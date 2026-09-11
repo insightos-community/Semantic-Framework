@@ -37,6 +37,8 @@ const reloadDebounce = 500 * time.Millisecond
 // Hooks 是白名单配置段的热应用回调，由 bootstrap 注入
 // （pkg/config 不反向依赖 pkg/llm / internal，保持 pkg 层纯净）。
 // 白名单表见本包 doc.go；未列入白名单的变更只 WARN，需重启生效。
+// hook 返回错误时须保留原状态，且不得修改传入配置；成功后可能再次以旧值
+// 调用以回滚本轮变更。不返回错误的 hook 也必须支持恢复旧值。
 type Hooks struct {
 	// OnLLMChanged llm.* 整段变更时调用（替换注册表快照 + 清空密钥缓存）。
 	OnLLMChanged func(LLMConfig) error
@@ -61,8 +63,8 @@ type Hooks struct {
 }
 
 // Reloader 监听配置文件与 ./.env 的变更，经 500ms 去抖后重新加载配置，
-// 按白名单热应用。校验失败（schema/语义/钩子拒绝）时保持旧配置运行，
-// 只记 ERROR，不让一次坏写入打挂服务。
+// 按白名单热应用。校验失败时保留旧配置；钩子拒绝时回滚已应用段，
+// 回滚失败时记录实际生效快照并报 ERROR。
 type Reloader struct {
 	// path 配置文件路径（与启动 -c 一致）。
 	path string
@@ -83,6 +85,9 @@ type Reloader struct {
 
 	// mu 保护 cfg。
 	mu sync.Mutex
+
+	// applyMu 串行化 watcher 与 ApplyExternal 的应用、回滚和快照发布。
+	applyMu sync.Mutex
 
 	// cfg 当前生效的配置快照（热应用成功后替换）。
 	cfg *Config
@@ -148,18 +153,12 @@ func (r *Reloader) Current() *Config {
 }
 
 // ApplyExternal 将外部（settings REST PATCH）写入并校验通过的新配置经同一
-// 白名单路径热应用：全部钩子成功后替换当前快照；任一钩子失败返回错误并
-// 保持旧快照。调用方须已完成 schema/语义校验与配置文件写回。
+// 白名单路径热应用：全部钩子成功后替换当前快照；任一钩子失败则回滚并
+// 返回错误。回滚失败时快照反映实际保留的配置。调用方须已完成校验与写回。
 // 文件写回触发的 watcher 事件随后到达时，diff 基于已替换的快照即为空，
 // 不会重复热应用（钩子幂等，双保险）。
 func (r *Reloader) ApplyExternal(next *Config) error {
-	r.mu.Lock()
-	old := r.cfg
-	r.mu.Unlock()
-	if !r.applyDiff(old, next) {
-		return fmt.Errorf("配置热应用失败，保持现有配置")
-	}
-	return nil
+	return r.applyDiff(next)
 }
 
 // loop 事件循环：收集目标文件事件，去抖后触发一次热应用周期。
@@ -205,7 +204,7 @@ func (r *Reloader) isTargetEvent(ev fsnotify.Event) bool {
 }
 
 // reload 执行一次热应用周期：先同步 ./.env 自有键，再重载并校验配置，
-// 最后按白名单 diff 热应用。任何一步失败都保持旧配置运行。
+// 最后按白名单 diff 热应用。钩子失败时尝试回滚本轮已应用的配置段。
 func (r *Reloader) reload() {
 	r.syncDotEnv(localDotEnvPath)
 
@@ -216,10 +215,9 @@ func (r *Reloader) reload() {
 		return
 	}
 
-	r.mu.Lock()
-	old := r.cfg
-	r.mu.Unlock()
-	r.applyDiff(old, next)
+	if err := r.applyDiff(next); err != nil {
+		r.logger.WithError(err).Error("配置热重载失败", "path", r.path)
+	}
 }
 
 // syncDotEnv 重新解析指定 .env 文件并只更新"自有键"：值变化则覆盖、
@@ -268,105 +266,99 @@ func (r *Reloader) syncDotEnv(path string) {
 	}
 }
 
-// applyDiff 对比新旧配置并按白名单热应用：
-// 全部钩子成功才替换当前快照（返回 true）；任一失败保持旧快照（返回 false），
-// 下次变更会基于旧快照重新 diff（钩子幂等，重复应用无副作用）。
-func (r *Reloader) applyDiff(old, next *Config) bool {
-	failed := false
+// reloadStep 记录一个配置段的应用与恢复操作。
+type reloadStep struct {
+	name    string
+	changed bool
+	apply   func() error
+	restore func() error
+}
 
-	// llm.* 整段（default/providers 任何变化都走同一入口：快照式替换）。
-	if !reflect.DeepEqual(old.LLM, next.LLM) {
-		if r.hooks.OnLLMChanged == nil {
-			r.logger.Warn("配置段 llm.* 已变更，但无热应用钩子，需重启生效")
-			failed = true
-		} else if err := r.hooks.OnLLMChanged(next.LLM); err != nil {
-			r.logger.WithError(err).Error("配置段 llm.* 热应用失败，保持旧配置")
-			failed = true
-		} else {
-			r.logger.Info("配置热应用成功", "section", "llm.*", "result", "注册表快照已替换")
+// newReloadStep 的 hook 必须在返回错误时保留其原状态，且不修改传入的配置。
+// field 跟踪该段最后一次成功应用的值，包括回滚失败后仍实际生效的新值。
+func newReloadStep[T any](name string, field *T, next T, hook func(T) error) reloadStep {
+	old := *field
+	set := func(value T) error {
+		if hook == nil {
+			return fmt.Errorf("配置段 %s 无热应用钩子，需重启生效", name)
 		}
+		if err := hook(value); err != nil {
+			return err
+		}
+		*field = value
+		return nil
+	}
+	return reloadStep{
+		name: name, changed: !reflect.DeepEqual(old, next),
+		apply:   func() error { return set(next) },
+		restore: func() error { return set(old) },
+	}
+}
+
+// infallibleReloadHook 适配不返回错误的 hook，同时保留 nil 的缺失语义。
+func infallibleReloadHook[T any](hook func(T)) func(T) error {
+	if hook == nil {
+		return nil
+	}
+	return func(value T) error { hook(value); return nil }
+}
+
+// applyDiff 串行执行热应用与快照发布；失败时恢复此前已成功的配置段。
+// 回滚也可能因资源不可用而失败，此时快照记录实际保留的状态并返回全部错误。
+func (r *Reloader) applyDiff(next *Config) error {
+	r.applyMu.Lock()
+	defer r.applyMu.Unlock()
+
+	old := r.Current()
+	effective := *old
+	steps := []reloadStep{
+		newReloadStep("llm.*", &effective.LLM, next.LLM, r.hooks.OnLLMChanged),
+		newReloadStep("log.level", &effective.Log.Level, next.Log.Level, infallibleReloadHook(r.hooks.OnLogLevelChanged)),
+		newReloadStep("agents.profiles_dir", &effective.Agents.ProfilesDir, next.Agents.ProfilesDir, r.hooks.OnProfilesDirChanged),
+		newReloadStep("skills.dir", &effective.Skills.Dir, next.Skills.Dir, r.hooks.OnSkillsDirChanged),
+		newReloadStep("mcp_servers", &effective.MCPServers, next.MCPServers, r.hooks.OnMCPServersChanged),
+		newReloadStep("execution.*", &effective.Execution, next.Execution, infallibleReloadHook(r.hooks.OnExecutionChanged)),
+	}
+	var applied []reloadStep
+	for _, step := range steps {
+		if !step.changed {
+			continue
+		}
+		if err := step.apply(); err != nil {
+			reloadErr := fmt.Errorf("配置段 %s 热应用失败: %w", step.name, err)
+			// 按依赖顺序恢复：旧角色可能引用只存在于旧 LLM 注册表的模型，
+			// 因此必须先恢复 LLM，再恢复 profiles，不能简单反转应用顺序。
+			for _, previous := range applied {
+				if err := previous.restore(); err != nil {
+					rollbackErr := fmt.Errorf("配置段 %s 回滚失败: %w", previous.name, err)
+					r.logger.WithError(rollbackErr).Error("配置回滚失败，快照保留该段实际生效值")
+					reloadErr = errors.Join(reloadErr, rollbackErr)
+				}
+			}
+			r.mu.Lock()
+			r.cfg = &effective
+			r.mu.Unlock()
+			return reloadErr
+		}
+		applied = append(applied, step)
 	}
 
-	// log.level
-	if old.Log.Level != next.Log.Level {
-		if r.hooks.OnLogLevelChanged == nil {
-			r.logger.Warn("配置项 log.level 已变更，但无热应用钩子，需重启生效")
-			failed = true
-		} else {
-			r.hooks.OnLogLevelChanged(next.Log.Level)
-			r.logger.Info("配置热应用成功", "section", "log.level", "level", next.Log.Level)
-		}
-	}
+	// 保留现有的成功快照语义：需要重启的配置仍取运行中的旧值。
+	effective = *next
+	effective.Server = old.Server
+	effective.Store = old.Store
+	effective.Agents.TeamsDir = old.Agents.TeamsDir
+	r.mu.Lock()
+	r.cfg = &effective
+	r.mu.Unlock()
 
-	// agents.profiles_dir
-	if old.Agents.ProfilesDir != next.Agents.ProfilesDir {
-		if r.hooks.OnProfilesDirChanged == nil {
-			r.logger.Warn("配置项 agents.profiles_dir 已变更，但无热应用钩子，需重启生效")
-			failed = true
-		} else if err := r.hooks.OnProfilesDirChanged(next.Agents.ProfilesDir); err != nil {
-			r.logger.WithError(err).Error("配置项 agents.profiles_dir 热应用失败，保持旧配置")
-			failed = true
-		} else {
-			r.logger.Info("配置热应用成功", "section", "agents.profiles_dir", "dir", next.Agents.ProfilesDir)
-		}
+	for _, step := range applied {
+		r.logger.Info("配置热应用成功", "section", step.name)
 	}
-
-	// skills.dir
-	if old.Skills.Dir != next.Skills.Dir {
-		if r.hooks.OnSkillsDirChanged == nil {
-			r.logger.Warn("配置项 skills.dir 已变更，但无热应用钩子，需重启生效")
-			failed = true
-		} else if err := r.hooks.OnSkillsDirChanged(next.Skills.Dir); err != nil {
-			r.logger.WithError(err).Error("配置项 skills.dir 热应用失败，保持旧配置")
-			failed = true
-		} else {
-			r.logger.Info("配置热应用成功", "section", "skills.dir", "dir", next.Skills.Dir)
-		}
-	}
-
-	// mcp_servers 整段（列表语义，任一元素变化即整段交给钩子）。
-	if !reflect.DeepEqual(old.MCPServers, next.MCPServers) {
-		if r.hooks.OnMCPServersChanged == nil {
-			r.logger.Warn("配置段 mcp_servers 已变更，但无热应用钩子，需重启生效")
-			failed = true
-		} else if err := r.hooks.OnMCPServersChanged(next.MCPServers); err != nil {
-			r.logger.WithError(err).Error("配置段 mcp_servers 热应用失败，保持旧配置")
-			failed = true
-		} else {
-			r.logger.Info("配置热应用成功", "section", "mcp_servers", "servers", len(next.MCPServers))
-		}
-	}
-
-	// execution.* 只有服务端宿主执行总开关，运行时可立即收紧或放开；
-	// 已有会话仍需自己显式开启，不因全局开关变化自动取得权限。
-	if old.Execution != next.Execution {
-		if r.hooks.OnExecutionChanged == nil {
-			r.logger.Warn("配置段 execution.* 已变更，但无热应用钩子，需重启生效")
-			failed = true
-		} else {
-			r.hooks.OnExecutionChanged(next.Execution)
-			r.logger.Info("配置热应用成功", "section", "execution.*",
-				"allow_host", next.Execution.AllowHost)
-		}
-	}
-
-	// 非白名单：逐键 WARN，需重启生效。
 	for _, key := range restartOnlyDiffs(old, next) {
 		r.logger.Warn("配置项已变更，需重启生效", "key", key)
 	}
-
-	if !failed {
-		// 快照只记录"实际生效"的配置：非白名单段保留旧值，
-		// 这样再次变更时 diff 基线仍是运行中的真实状态。
-		effective := *next
-		effective.Server = old.Server
-		effective.Store = old.Store
-		effective.Agents.TeamsDir = old.Agents.TeamsDir
-		r.mu.Lock()
-		r.cfg = &effective
-		r.mu.Unlock()
-	}
-	return !failed
+	return nil
 }
 
 // restartOnlyDiffs 列出非白名单段的变更键（server.*、store.* 与

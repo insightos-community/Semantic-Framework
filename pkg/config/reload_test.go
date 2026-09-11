@@ -17,8 +17,11 @@ package config
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -285,5 +288,207 @@ func TestSyncDotEnvOwnedKeys(t *testing.T) {
 	}
 	if got := os.Getenv("SEMANTIC_TEST_SYNC_EXTERNAL"); got != "keep" {
 		t.Errorf("未被跟踪的外部键不应被 .env 改写，实际: %q", got)
+	}
+}
+
+// TestReloadFileHookFailure 验证文件重载失败会恢复真实日志器的级别。
+func TestReloadFileHookFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "semantic-server.yaml")
+	rewriteConfig(t, path, "log:\n  level: info\n")
+	initial, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := log.New(log.Options{Level: log.LevelInfo, Writer: io.Discard})
+	r := &Reloader{path: path, cfg: initial, logger: logger, hooks: Hooks{
+		OnLogLevelChanged: func(v string) { logger.SetLevel(log.ParseLevel(v)) },
+		OnProfilesDirChanged: func(dir string) error {
+			_, err := os.Stat(dir)
+			return err
+		},
+	}}
+	missing := filepath.Join(t.TempDir(), "missing")
+	rewriteConfig(t, path, "log:\n  level: debug\nagents:\n  profiles_dir: "+missing+"\n")
+	r.reload()
+	if logger.Level() != log.LevelInfo || !reflect.DeepEqual(r.Current(), initial) {
+		t.Fatalf("failed file reload changed logger or snapshot: level=%s", logger.Level())
+	}
+}
+
+// TestReloadHookFailureRestoresRuntime 验证拒绝更新后运行态与快照一致。
+func TestReloadHookFailureRestoresRuntime(t *testing.T) {
+	for _, name := range []string{"rejected hook", "missing hook"} {
+		t.Run(name, func(t *testing.T) {
+			initial := &Config{}
+			initial.Log.Level = "info"
+			initial.Agents.ProfilesDir = "old"
+			level := initial.Log.Level
+			hooks := Hooks{OnLogLevelChanged: func(v string) { level = v }}
+			if name == "rejected hook" {
+				hooks.OnProfilesDirChanged = func(string) error { return errors.New("invalid profile") }
+			}
+			r := &Reloader{cfg: initial, hooks: hooks, logger: log.New(log.Options{Writer: io.Discard})}
+			next := *initial
+			next.Log.Level = "debug"
+			next.Agents.ProfilesDir = "new"
+			if err := r.ApplyExternal(&next); err == nil {
+				t.Fatal("expected reload failure")
+			}
+			if level != "info" || !reflect.DeepEqual(r.Current(), initial) {
+				t.Fatalf("failed reload changed runtime or snapshot: level=%s snapshot=%+v", level, r.Current())
+			}
+			if err := r.ApplyExternal(initial); err != nil || level != "info" {
+				t.Fatalf("restoring the original config left a stale level: %s, %v", level, err)
+			}
+		})
+	}
+}
+
+// TestReloadRollbackOrder 验证 LLM 在依赖它的角色加载器之前恢复。
+func TestReloadRollbackOrder(t *testing.T) {
+	initial := &Config{}
+	initial.LLM.Default = "old"
+	initial.Log.Level = "info"
+	initial.Agents.ProfilesDir = "old"
+	initial.Skills.Dir = "old"
+	actual := *initial
+	rejection := errors.New("invalid MCP config")
+	r := &Reloader{cfg: initial, logger: log.New(log.Options{Writer: io.Discard}), hooks: Hooks{
+		OnLLMChanged:      func(v LLMConfig) error { actual.LLM = v; return nil },
+		OnLogLevelChanged: func(v string) { actual.Log.Level = v },
+		OnProfilesDirChanged: func(v string) error {
+			if actual.LLM.Default != v {
+				return errors.New("profile requires matching LLM")
+			}
+			actual.Agents.ProfilesDir = v
+			return nil
+		},
+		OnSkillsDirChanged:  func(v string) error { actual.Skills.Dir = v; return nil },
+		OnMCPServersChanged: func([]MCPServerConfig) error { return rejection },
+		OnExecutionChanged:  func(v ExecutionConfig) { actual.Execution = v },
+	}}
+	next := *initial
+	next.LLM.Default = "new"
+	next.Log.Level = "debug"
+	next.Agents.ProfilesDir = "new"
+	next.Skills.Dir = "new"
+	next.MCPServers = []MCPServerConfig{{Name: "new"}}
+	next.Execution.AllowHost = true
+	if err := r.ApplyExternal(&next); err == nil {
+		t.Fatal("expected reload failure")
+	}
+	if !reflect.DeepEqual(actual, *initial) || !reflect.DeepEqual(r.Current(), initial) {
+		t.Fatalf("rollback did not restore runtime and snapshot: actual=%+v snapshot=%+v", actual, r.Current())
+	}
+}
+
+// TestReloadRollbackFailureTracksRuntime 验证回滚失败可见且下次仍可重试恢复。
+func TestReloadRollbackFailureTracksRuntime(t *testing.T) {
+	initial := &Config{}
+	initial.LLM.Default = "old"
+	initial.Log.Level = "info"
+	initial.Agents.ProfilesDir = "old"
+	actual := *initial
+	rollbackErr := errors.New("old LLM unavailable")
+	rejectRollback := true
+	r := &Reloader{cfg: initial, logger: log.New(log.Options{Writer: io.Discard}), hooks: Hooks{
+		OnLLMChanged: func(v LLMConfig) error {
+			if rejectRollback && v.Default == "old" {
+				return rollbackErr
+			}
+			actual.LLM = v
+			return nil
+		},
+		OnLogLevelChanged:    func(v string) { actual.Log.Level = v },
+		OnProfilesDirChanged: func(string) error { return errors.New("invalid profile") },
+	}}
+	next := *initial
+	next.LLM.Default = "new"
+	next.Log.Level = "debug"
+	next.Agents.ProfilesDir = "new"
+	if err := r.ApplyExternal(&next); !errors.Is(err, rollbackErr) {
+		t.Fatalf("expected rollback error, got %v", err)
+	}
+	if actual.LLM.Default != "new" || actual.Log.Level != "info" || !reflect.DeepEqual(*r.Current(), actual) {
+		t.Fatalf("rollback failure hidden from snapshot: actual=%+v snapshot=%+v", actual, r.Current())
+	}
+	rejectRollback = false
+	if err := r.ApplyExternal(initial); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(actual, *initial) || !reflect.DeepEqual(r.Current(), initial) {
+		t.Fatal("retry did not restore the original runtime and snapshot")
+	}
+}
+
+// TestReloadMCPRollbackAndRetry 验证最后一段缺少 hook 时恢复 MCP，修正后可重试。
+func TestReloadMCPRollbackAndRetry(t *testing.T) {
+	initial := &Config{MCPServers: []MCPServerConfig{{Name: "old"}}}
+	actual := *initial
+	r := &Reloader{cfg: initial, logger: log.New(log.Options{Writer: io.Discard}), hooks: Hooks{
+		OnMCPServersChanged: func(v []MCPServerConfig) error { actual.MCPServers = v; return nil },
+	}}
+	next := *initial
+	next.MCPServers = []MCPServerConfig{{Name: "new"}}
+	next.Execution.AllowHost = true
+	if err := r.ApplyExternal(&next); err == nil {
+		t.Fatal("expected missing execution hook error")
+	}
+	if !reflect.DeepEqual(actual, *initial) || !reflect.DeepEqual(r.Current(), initial) {
+		t.Fatal("failed update did not restore MCP servers")
+	}
+	r.hooks.OnExecutionChanged = func(v ExecutionConfig) { actual.Execution = v }
+	if err := r.ApplyExternal(&next); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(actual, next) || !reflect.DeepEqual(*r.Current(), next) {
+		t.Fatal("retry did not apply the complete configuration")
+	}
+}
+
+// TestReloadSerializesUpdates 验证后续更新必须以先前操作完成后的快照为基线。
+func TestReloadSerializesUpdates(t *testing.T) {
+	initial := &Config{}
+	initial.Log.Level = "info"
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	level := "info"
+	r := &Reloader{cfg: initial, logger: log.New(log.Options{Writer: io.Discard}), hooks: Hooks{
+		OnLogLevelChanged: func(v string) {
+			if v == "debug" {
+				close(entered)
+				<-release
+			}
+			level = v
+		},
+	}}
+	next := *initial
+	next.Log.Level = "debug"
+	first := make(chan error, 1)
+	go func() { first <- r.ApplyExternal(&next) }()
+	<-entered
+	second := make(chan error, 1)
+	go func() { second <- r.ApplyExternal(initial) }()
+	select {
+	case err := <-second:
+		t.Fatalf("second update finished before the first: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblock()
+	for _, done := range []chan error{first, second} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("reload did not complete")
+		}
+	}
+	if level != "info" || r.Current().Log.Level != level {
+		t.Fatalf("concurrent updates left stale runtime or snapshot: level=%s snapshot=%s", level, r.Current().Log.Level)
 	}
 }

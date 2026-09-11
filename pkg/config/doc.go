@@ -35,8 +35,9 @@
 //	                     目录变化下轮 PrepareAgent 生效，无需额外广播）
 //	其余（server.*/store.*）不热应用：WARN 日志"配置项 X 已变更，需重启生效"
 //
-// 热应用成功打 INFO 审计日志（变更段/结果）；校验或钩子失败保持旧配置
-// 运行并记 ERROR。Watcher 随 App.Run 启动、随优雅关闭停止。
+// 热应用成功打 INFO 审计日志（变更段/结果）；校验失败保留旧配置，钩子失败
+// 则回滚本轮已应用段。回滚失败时记 ERROR，快照保留该段实际生效值以便重试。
+// 配置文件不回滚。Watcher 随 App.Run 启动、随优雅关闭停止。
 //
 // 配置树视图（tree.go）：Tree/TreeHash/MergeTree/DecodeTree/PatchPaths
 // 把配置快照导出为 yaml 键名的通用键值树，是 settings REST 的快照序列化、

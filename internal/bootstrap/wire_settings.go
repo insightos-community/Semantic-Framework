@@ -151,7 +151,7 @@ func (c *settingsController) Patch(baseHash string, patch map[string]any) (map[s
 	}
 
 	if err := c.app.reloader.ApplyExternal(next); err != nil {
-		// 文件已写回但热应用失败：运行态保持旧配置，如实返回错误。
+		// 文件已写回但热应用失败：reloader 已尝试回滚运行态，如实返回错误。
 		return nil, "", nil, fmt.Errorf("配置已写回 %s，但热应用失败: %w", c.configPath, err)
 	}
 

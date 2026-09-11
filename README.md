@@ -130,6 +130,7 @@ Use its `build` workflow with the Robot Python **3.13** interpreter. Publish the
 
 - Missing or offline Robot: verify Pilot connectivity, active catalog, Runtime registration, and published Skill versions.
 - Configuration changes do not apply: check the generated configuration used by the running process.
+- If a hot-reload hook fails, previously applied sections are restored to their old values. A rollback failure is reported explicitly and the settings snapshot retains the last successfully applied value for that section. Correct the invalid configuration and retry; the configuration file itself is not rolled back.
 - Unit tests do not cover the entire product: simulation gates require assets and sibling repositories; model-provider gates can make billable calls.
 - Bind development ports to trusted interfaces and keep tokens out of commits.
 
