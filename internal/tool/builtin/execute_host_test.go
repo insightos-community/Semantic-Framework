@@ -70,8 +70,11 @@ func TestExecuteHostTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute_host 失败: %v", err)
 	}
-	wantDir := filepath.Join(workspace, "diagnostics")
-	if !strings.HasPrefix(fake.command, "cd -- "+shellSingleQuote(wantDir)+" && exec setsid /bin/sh -c ") ||
+	wantDir, err := filepath.EvalSymlinks(filepath.Join(workspace, "diagnostics"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(fake.command, "cd -- "+shellSingleQuote(wantDir)+" && "+hostSessionCommand()) ||
 		!strings.Contains(fake.command, "semantic-server --check") {
 		t.Fatalf("Local Backend 命令边界不一致: %q", fake.command)
 	}

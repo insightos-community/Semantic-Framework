@@ -1,0 +1,41 @@
+name: Native macOS
+on:
+  pull_request:
+  push:
+    branches: [main, feat/macos-native]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.25.8
+      - name: Build and test native server, pilot, and CLI
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          test "$(uname -m)" = arm64
+          mkdir -p .output/bin
+          for name in semantic-server semantic-pilot semantic; do
+            go build -p 2 -trimpath -o ".output/bin/$name" "./cmd/$name"
+          done
+          .output/bin/semantic-server --help
+          .output/bin/semantic-pilot --help
+          status=0
+          .output/bin/semantic --help || status=$?
+          test "$status" = 0 || test "$status" = 2
+          go test -p 2 ./... -count=1 -timeout=10m
+      - name: Archive native development binaries
+        run: tar -czf .output/semantic-framework-macos-arm64-development.tar.gz -C .output/bin .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: semantic-framework-macos-arm64-development
+          path: .output/*.tar.gz
+          if-no-files-found: error

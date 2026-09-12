@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cloudwego/eino-ext/adk/backend/local"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/google/uuid"
 
@@ -49,7 +48,7 @@ type executeHostTool struct {
 // newExecuteHostTool 创建生产用宿主执行工具。
 func newExecuteHostTool() *executeHostTool {
 	return &executeHostTool{newBackend: func(ctx context.Context) (localExecutor, error) {
-		return local.NewBackend(ctx, &local.Config{})
+		return newPlatformHostBackend(ctx)
 	}}
 }
 
@@ -108,7 +107,7 @@ func (t *executeHostTool) Run(ctx context.Context, argsJSON string) (string, err
 	innerCommand := "echo $$ > " + shellSingleQuote(pidFile) +
 		" && exec /bin/sh -c " + shellSingleQuote(args.Command)
 	command := "cd -- " + shellSingleQuote(hostWorkdir) +
-		" && exec setsid /bin/sh -c " + shellSingleQuote(innerCommand)
+		" && " + hostSessionCommand() + shellSingleQuote(innerCommand)
 	type backendResult struct {
 		response *filesystem.ExecuteResponse
 		err      error
