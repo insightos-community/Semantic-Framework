@@ -38,4 +38,5 @@ jobs:
         with:
           name: semantic-framework-macos-arm64-development
           path: .output/*.tar.gz
+          include-hidden-files: true
           if-no-files-found: error
