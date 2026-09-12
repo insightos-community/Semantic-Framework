@@ -599,7 +599,7 @@ func managedExecutableRunning(pid int, expectedExecutable string) (bool, error) 
 	if pid <= 0 {
 		return false, nil
 	}
-	actual, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	actual, err := managedProcessExecutable(pid)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil

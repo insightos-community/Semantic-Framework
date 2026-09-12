@@ -32,6 +32,10 @@ func TestResolveWorkspacePath(t *testing.T) {
 	if err := os.WriteFile(file, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	file, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		t.Fatal(err)
+	}
 	abs, rel, err := ResolveWorkspacePath(workspace, "reports/result.json")
 	if err != nil || abs != file || rel != "reports/result.json" {
 		t.Fatalf("相对路径解析不一致: abs=%q rel=%q err=%v", abs, rel, err)
