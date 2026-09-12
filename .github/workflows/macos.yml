@@ -2,7 +2,7 @@ name: Native macOS
 on:
   pull_request:
   push:
-    branches: [main, feat/macos-native]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read

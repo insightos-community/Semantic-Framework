@@ -36,11 +36,11 @@ type localExecutor interface {
 	Execute(ctx context.Context, input *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error)
 }
 
-// localExecutorFactory 允许单元测试替换真实宿主命令，生产仍直接创建上游
-// Local Backend，不复制其 Shell 执行实现。
+// localExecutorFactory 为平台执行器提供测试替换点。Linux 使用上游 Local
+// Backend；Darwin 用原生进程组实现同一 Execute 接口。
 type localExecutorFactory func(ctx context.Context) (localExecutor, error)
 
-// executeHostTool 在当前 Project workspace 内调用 Eino-ext Local Backend。
+// executeHostTool 在当前 Project workspace 内调用宿主执行器。
 type executeHostTool struct {
 	newBackend localExecutorFactory
 }
@@ -99,9 +99,8 @@ func (t *executeHostTool) Run(ctx context.Context, argsJSON string) (string, err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	// Local Backend 没有 workdir 与进程组句柄，因此用 setsid 建立本次命令
-	// 专属进程组，并把组长 PID 写入 Project 内的临时文件。取消时只补充一次
-	// 进程组 kill，实际命令创建和等待仍由上游 Local Backend 完成。
+	// Linux 用 setsid 建立独立进程组，Darwin 执行器通过 Setpgid 建立。
+	// 组长 PID 写入 Project 临时文件，取消时终止本次命令的整个进程组。
 	pidFile := filepath.Join(hostWorkdir, ".semantic-exec-"+uuid.NewString()+".pid")
 	defer func() { _ = os.Remove(pidFile) }()
 	innerCommand := "echo $$ > " + shellSingleQuote(pidFile) +

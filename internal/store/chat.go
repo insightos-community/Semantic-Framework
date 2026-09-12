@@ -153,9 +153,6 @@ func NewRunSessionID() string {
 	return "run-" + uuid.NewString()
 }
 
-// NewChatMessageID 生成消息 ID：msg-<19 位纳秒时间戳>-<8 字节随机数十六进制>。
-// 为什么不用 uuid：消息列表按 id 排序即得时间序（断连续传、历史重放都依赖
-// 该顺序），固定宽度的时间戳前缀保证字典序与时间序一致；随机段消解同纳秒冲突。
 var lastMessageTimestamp atomic.Int64
 
 func monotonicMessageTimestamp(last *atomic.Int64, now int64) int64 {
@@ -171,6 +168,9 @@ func monotonicMessageTimestamp(last *atomic.Int64, now int64) int64 {
 	}
 }
 
+// NewChatMessageID uses a process-monotonic timestamp prefix for replay ordering.
+// Repeated or backwards wall-clock readings cannot reverse IDs within this process;
+// the random suffix retains uniqueness across processes and restarts.
 func NewChatMessageID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
