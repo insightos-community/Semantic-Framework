@@ -462,6 +462,9 @@ func verifyArchiveSHA256(path, expected string) error {
 }
 
 func extractRuntimePackArchive(ctx context.Context, parent, archive string) (string, func(), error) {
+	if strings.HasSuffix(archive, ".tar.gz") {
+		return extractRuntimePackGzip(ctx, parent, archive)
+	}
 	listing, err := exec.CommandContext(ctx, "tar", "--zstd", "-tf", archive).Output()
 	if err != nil {
 		return "", func() {}, fmt.Errorf("读取 Runtime Pack 目录失败: %w", err)

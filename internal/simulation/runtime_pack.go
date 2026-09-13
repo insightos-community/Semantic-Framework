@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -261,7 +262,11 @@ func RuntimeContentEnvironment(content map[string]string) ([]string, error) {
 		}
 		result = append(result, name+"="+value)
 	}
-	result = append(result, "MUJOCO_GL=egl")
+	backend := "egl"
+	if runtime.GOOS == "darwin" {
+		backend = "cgl"
+	}
+	result = append(result, "MUJOCO_GL="+backend)
 	sort.Strings(result)
 	return result, nil
 }
