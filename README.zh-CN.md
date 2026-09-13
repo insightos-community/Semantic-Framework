@@ -180,3 +180,7 @@ Semantic 的组件围绕共同的任务模型和执行链路协作。你可以�
 ## 许可证
 
 Copyright 2026 InsightOS。自有代码采用 [Apache-2.0](LICENSE) 许可证。第三方组件与资产的说明见 [NOTICE](NOTICE) 和 [LICENSE_SCOPE.md](LICENSE_SCOPE.md)。
+
+## 三个平台的构建复现
+
+参见 [glibc、musl 与 macOS 构建说明](README.build.md)：包含已锁定的源码版本、实际脚本入口、工具要求、本地与 CI 指令、产物位置和平台验证范围。

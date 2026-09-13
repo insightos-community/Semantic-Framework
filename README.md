@@ -181,3 +181,7 @@ Contributions to the core, Studio, skills, robot adapters, scenes, and documenta
 ## License
 
 Copyright 2026 InsightOS. First-party code is licensed under [Apache-2.0](LICENSE). See [NOTICE](NOTICE) and [LICENSE_SCOPE.md](LICENSE_SCOPE.md) for third-party components and assets.
+
+## Reproducible platform builds
+
+See [glibc, musl and macOS build instructions](README.build.md) for pinned source revisions, exact scripts, tool requirements, local commands, CI reproduction and platform support boundaries.
