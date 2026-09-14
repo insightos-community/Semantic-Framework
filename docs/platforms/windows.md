@@ -5,7 +5,12 @@ Target: Windows x64, with Go 1.25.8. The native Windows workflow builds
 an Actions development artifact. This is not a complete product installer.
 
 ```powershell
-# Use MinGW-w64 GCC on PATH; MuPDF is linked from its bundled Windows archives.
+# Install LLVM-MinGW 20260908 UCRT x86_64, verify the archive SHA-256:
+# 1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6
+# Add its bin directory to PATH. The MSVCRT variant is incompatible with
+# the bundled go-fitz MuPDF archives; do not substitute it.
+$env:CC = 'x86_64-w64-mingw32-clang'
+$env:CXX = 'x86_64-w64-mingw32-clang++'
 $env:CGO_ENABLED = '1'
 $env:GOFLAGS = '-ldflags=-extldflags=-static'
 go build -o .output/bin/semantic.exe ./cmd/semantic
