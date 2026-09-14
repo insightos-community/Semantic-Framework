@@ -18,6 +18,7 @@ package pilot
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"insightos.cn/semantic-framework/internal/ports/platform"
 	"os"
@@ -46,6 +47,10 @@ type VenvSkillInstaller struct {
 	PythonExecutable string
 	SDKSource        string
 	Wheelhouse       string
+	// Explicit bundled uv avoids ensurepip and host package tooling.
+	UVExecutable string
+	// Optional short, installation-owned root; each Robot/Skill keeps an isolated environment.
+	EnvironmentRoot string
 }
 
 var lockedRequirement = regexp.MustCompile(`^[A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_,.-]+\])?==[^[:space:]]+$`)
@@ -63,6 +68,10 @@ func (i VenvSkillInstaller) Prepare(ctx context.Context, definition SkillDefinit
 		python = "python"
 	}
 	environment := filepath.Join(i.BaseDirectory, definition.Name, definition.Version)
+	if i.EnvironmentRoot != "" {
+		identity := sha256.Sum256([]byte(environment))
+		environment = filepath.Join(i.EnvironmentRoot, fmt.Sprintf("%x", identity[:12]))
+	}
 	venvPython := platform.VenvExecutable(environment, "python")
 	ready := filepath.Join(environment, ".semantic-ready")
 	if _, err := os.Stat(ready); err == nil {
@@ -75,14 +84,34 @@ func (i VenvSkillInstaller) Prepare(ctx context.Context, definition SkillDefinit
 	// base python 的 site-packages，继承不到 bundle 固定的依赖；真正的依赖
 	// 复用靠 Wheelhouse 离线安装。Skill SDK 和 requirements.lock 仍安装在
 	// 独立 venv 中，安装过程不访问公网，也不把具体 Skill 打进 Robot 类型包。
-	if output, err := exec.CommandContext(ctx, python, "-m", "venv", "--system-site-packages", environment).CombinedOutput(); err != nil {
-		return PreparedSkillEnvironment{}, fmt.Errorf("create skill venv: %w: %s", err, output)
-	}
-	if output, err := exec.CommandContext(ctx, venvPython, append([]string{"-m", "pip"}, i.installArgs(i.SDKSource)...)...).CombinedOutput(); err != nil {
-		return PreparedSkillEnvironment{}, fmt.Errorf("install robot skill sdk: %w: %s", err, output)
-	}
-	if output, err := exec.CommandContext(ctx, venvPython, append([]string{"-m", "pip"}, i.installArgs("-r", lockFile)...)...).CombinedOutput(); err != nil {
-		return PreparedSkillEnvironment{}, fmt.Errorf("install skill requirements: %w: %s", err, output)
+	if i.UVExecutable != "" {
+		command := exec.CommandContext(ctx, i.UVExecutable, "--no-config", "venv", "--allow-existing", "--system-site-packages", "--python", python, environment)
+		if output, err := command.CombinedOutput(); err != nil {
+			return PreparedSkillEnvironment{}, fmt.Errorf("create skill venv with bundled uv: %w: %s", err, output)
+		}
+		for _, target := range [][]string{{i.SDKSource}, {"-r", lockFile}} {
+			args := []string{"--no-config", "pip", "install", "--python", venvPython}
+			if i.Wheelhouse != "" {
+				args = append(args, "--no-index", "--find-links", i.Wheelhouse)
+			}
+			if output, err := exec.CommandContext(ctx, i.UVExecutable, append(args, target...)...).CombinedOutput(); err != nil {
+				return PreparedSkillEnvironment{}, fmt.Errorf("install skill dependencies with bundled uv: %w: %s", err, output)
+			}
+		}
+	} else {
+		// Run ensurepip separately: venv otherwise hides the useful child traceback.
+		if output, err := exec.CommandContext(ctx, python, "-m", "venv", "--without-pip", "--system-site-packages", environment).CombinedOutput(); err != nil {
+			return PreparedSkillEnvironment{}, fmt.Errorf("create skill venv: %w: %s", err, output)
+		}
+		if output, err := exec.CommandContext(ctx, venvPython, "-m", "ensurepip", "--upgrade", "--default-pip").CombinedOutput(); err != nil {
+			return PreparedSkillEnvironment{}, fmt.Errorf("initialize skill pip in %s: %w: %s", environment, err, output)
+		}
+		if output, err := exec.CommandContext(ctx, venvPython, append([]string{"-m", "pip"}, i.installArgs(i.SDKSource)...)...).CombinedOutput(); err != nil {
+			return PreparedSkillEnvironment{}, fmt.Errorf("install robot skill sdk: %w: %s", err, output)
+		}
+		if output, err := exec.CommandContext(ctx, venvPython, append([]string{"-m", "pip"}, i.installArgs("-r", lockFile)...)...).CombinedOutput(); err != nil {
+			return PreparedSkillEnvironment{}, fmt.Errorf("install skill requirements: %w: %s", err, output)
+		}
 	}
 	if err := os.WriteFile(ready, []byte(definition.Name+"@"+definition.Version+"\n"), 0o644); err != nil {
 		return PreparedSkillEnvironment{}, err

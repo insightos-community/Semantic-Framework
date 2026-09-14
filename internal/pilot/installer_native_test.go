@@ -14,7 +14,11 @@ import (
 	"time"
 )
 
-func TestNativeOfflineSkillInstallation(t *testing.T) {
+func TestNativeOfflineSkillInstallation(t *testing.T) { testOfflineSkillInstallation(t, false) }
+
+func TestNativeOfflineSkillInstallationWithUV(t *testing.T) { testOfflineSkillInstallation(t, true) }
+
+func testOfflineSkillInstallation(t *testing.T, useUV bool) {
 	python := os.Getenv("SEMANTIC_TEST_PYTHON")
 	if python == "" {
 		t.Skip("set SEMANTIC_TEST_PYTHON to a real Python with venv/ensurepip")
@@ -72,6 +76,18 @@ func TestNativeOfflineSkillInstallation(t *testing.T) {
 		t.Fatal(err)
 	}
 	installer := VenvSkillInstaller{BaseDirectory: filepath.Join(root, "environments"), PythonExecutable: python, SDKSource: sdk, Wheelhouse: wheels}
+	if useUV {
+		uv := os.Getenv("SEMANTIC_TEST_UV")
+		if uv == "" {
+			t.Skip("set SEMANTIC_TEST_UV to the bundled uv executable")
+		}
+		installer.UVExecutable = uv
+		installer.EnvironmentRoot = filepath.Join(root, "short-envs")
+		// Match a real nested Robot path; only the venv is placed in the short root.
+		installer.BaseDirectory = filepath.Join(root, "robots", "r1_pro_tote_gripper-1", "robot-5d470506-f131-40d4-9f36-892fda19f27a-r1_pro_tote_gripper-1", "pilot", "skills", "environments")
+		t.Setenv("UV_OFFLINE", "1")
+		t.Setenv("UV_PYTHON_DOWNLOADS", "never")
+	}
 	definition := SkillDefinition{Name: "native-probe", Version: "1.0", Directory: definitionDir}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -79,11 +95,15 @@ func TestNativeOfflineSkillInstallation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if useUV && filepath.Dir(prepared.PythonExecutable) == filepath.Join(installer.BaseDirectory, definition.Name, definition.Version, "Scripts") {
+		t.Fatal("short environment root was ignored")
+	}
 	code := "import semantic_native_fixture_sdk as sdk, semantic_native_fixture_dependency as dep; assert sdk.VALUE == dep.VALUE == 'offline-verified'"
 	if output, err := exec.CommandContext(ctx, prepared.PythonExecutable, "-I", "-B", "-c", code).CombinedOutput(); err != nil {
 		t.Fatalf("installed SDK/dependency import: %v: %s", err, output)
 	}
 	installer.PythonExecutable = filepath.Join(root, "missing-python")
+	installer.UVExecutable = filepath.Join(root, "missing-uv")
 	repeated, err := installer.Prepare(ctx, definition)
 	if err != nil || repeated.PythonExecutable != prepared.PythonExecutable {
 		t.Fatalf("ready environment must be reusable: %+v, %v", repeated, err)
