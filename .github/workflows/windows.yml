@@ -20,13 +20,16 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: 1.25.8
-      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
-        id: mingw
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc
-      - name: Select compiler for statically linked MuPDF
-        run: '"${{ steps.mingw.outputs.msys2-location }}/mingw64/bin" >> $env:GITHUB_PATH'
+      - name: Install pinned LLVM-MinGW toolchain
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          Invoke-WebRequest 'https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-msvcrt-x86_64.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne '341cc9786b54956467ac19a02fdb00749307eac133da56108f643e4189db810b') { throw 'Compiler SHA-256 mismatch' }
+          Expand-Archive $archive $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP/llvm-mingw-20260908-msvcrt-x86_64/bin" >> $env:GITHUB_PATH
+          'CC=x86_64-w64-mingw32-clang' >> $env:GITHUB_ENV
+          'CXX=x86_64-w64-mingw32-clang++' >> $env:GITHUB_ENV
       - name: Build native CLI, server and Pilot
         shell: pwsh
         run: |

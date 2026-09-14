@@ -722,7 +722,7 @@ func buildRuntimeEnvironment(ctx context.Context, packPath, target string,
 	if err != nil {
 		return err
 	}
-	if info, err := os.Stat(executable); err != nil || info.Mode()&0o111 == 0 {
+	if info, err := os.Stat(executable); err != nil || !platform.Runnable(info) {
 		return fmt.Errorf("Runtime Pack 安装后缺少可执行入口 %s", executable)
 	}
 	complete = true
@@ -1269,7 +1269,7 @@ func diagnoseRuntimeInstallation(
 	if err != nil {
 		return err
 	}
-	if info, err := os.Stat(executable); err != nil || info.Mode()&0o111 == 0 {
+	if info, err := os.Stat(executable); err != nil || !platform.Runnable(info) {
 		return errors.New("Runtime 入口不存在或不可执行")
 	}
 	for key, path := range item.ContentRefs {
