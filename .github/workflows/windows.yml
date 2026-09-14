@@ -1,0 +1,56 @@
+name: Native Windows
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      CGO_ENABLED: '1'
+      GOFLAGS: '-ldflags=-extldflags=-static'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.25.8
+      - name: Install pinned LLVM-MinGW toolchain
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          Invoke-WebRequest 'https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-x86_64.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne '1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6') { throw 'Compiler SHA-256 mismatch' }
+          Expand-Archive $archive $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP/llvm-mingw-20260908-ucrt-x86_64/bin" >> $env:GITHUB_PATH
+          'CC=x86_64-w64-mingw32-clang' >> $env:GITHUB_ENV
+          'CXX=x86_64-w64-mingw32-clang++' >> $env:GITHUB_ENV
+      - name: Build native CLI, server and Pilot
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .output/bin | Out-Null
+          foreach ($name in @('semantic', 'semantic-server', 'semantic-pilot')) {
+            go build -trimpath -o ".output/bin/$name.exe" "./cmd/$name"
+            if ($LASTEXITCODE -ne 0) { throw "Build failed: $name" }
+          }
+          "SEMANTIC_NATIVE_BIN=$((Resolve-Path .output/bin).Path)" >> $env:GITHUB_ENV
+      - name: Process contracts and real server lifecycle
+        run: go test -json ./internal/ports/... -count=1 -timeout=4m > windows-contracts.json
+      - name: PowerShell execution, permission gates and cancellation
+        run: go test -json ./internal/tool/builtin -run 'TestExecuteHost|TestWindowsHost' -count=1 -timeout=3m > windows-host-tests.json
+      - name: Package development executables
+        run: Compress-Archive -Path .output/bin/* -DestinationPath semantic-framework-windows-amd64-development.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: semantic-framework-windows-amd64-development
+          path: |
+            semantic-framework-windows-amd64-development.zip
+            windows-contracts.json
+            windows-host-tests.json
+          if-no-files-found: error

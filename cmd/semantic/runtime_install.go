@@ -24,6 +24,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"insightos.cn/semantic-framework/internal/ports/platform"
+	processport "insightos.cn/semantic-framework/internal/ports/process"
 	"io"
 	"maps"
 	"net"
@@ -34,7 +36,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -702,7 +703,7 @@ func buildRuntimeEnvironment(ctx context.Context, packPath, target string,
 		target).CombinedOutput(); err != nil {
 		return fmt.Errorf("创建 Runtime Python 环境失败: %w: %s", err, output)
 	}
-	python := filepath.Join(target, "bin", "python")
+	python := platform.VenvExecutable(target, "python")
 	wheelhouse := filepath.Join(packPath, "wheelhouse")
 	lock := filepath.Join(packPath, filepath.FromSlash(manifest.RequirementsLock.Path))
 	args := []string{"pip", "sync", "--python", python, "--no-index", "--find-links", wheelhouse, lock}
@@ -721,7 +722,7 @@ func buildRuntimeEnvironment(ctx context.Context, packPath, target string,
 	if err != nil {
 		return err
 	}
-	if info, err := os.Stat(executable); err != nil || info.Mode()&0o111 == 0 {
+	if info, err := os.Stat(executable); err != nil || !platform.Runnable(info) {
 		return fmt.Errorf("Runtime Pack 安装后缺少可执行入口 %s", executable)
 	}
 	complete = true
@@ -777,7 +778,7 @@ func runRuntimeSmoke(ctx context.Context, installation simulation.RuntimeInstall
 	}
 	logPath := logFile.Name()
 	defer func() { _ = logFile.Close(); _ = os.Remove(logPath) }()
-	command := exec.CommandContext(ctx, executable)
+	command := exec.Command(executable)
 	env, err := simulation.RuntimeContentEnvironment(installation.ContentRefs)
 	if err != nil {
 		return err
@@ -788,11 +789,11 @@ func runRuntimeSmoke(ctx context.Context, installation simulation.RuntimeInstall
 	command.Env = append(os.Environ(), env...)
 	command.Dir = installation.EnvironmentPath
 	command.Stdout, command.Stderr = logFile, logFile
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := command.Start(); err != nil {
+	tree, err := processport.Start(command)
+	if err != nil {
 		return fmt.Errorf("启动 Runtime smoke 失败: %w", err)
 	}
-	defer stopSmokeProcess(command)
+	defer stopSmokeProcess(command, tree)
 	client := &http.Client{Timeout: 3 * time.Second}
 	deadline := time.Now().Add(60 * time.Second)
 	for {
@@ -867,17 +868,18 @@ func runRuntimeSmoke(ctx context.Context, installation simulation.RuntimeInstall
 	return nil
 }
 
-func stopSmokeProcess(command *exec.Cmd) {
+func stopSmokeProcess(command *exec.Cmd, tree *processport.Tree) {
+	defer tree.Close()
 	if command == nil || command.Process == nil {
 		return
 	}
-	_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+	_ = tree.Terminate()
 	done := make(chan struct{})
 	go func() { _ = command.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(8 * time.Second):
-		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = tree.Kill()
 		<-done
 	}
 }
@@ -1267,7 +1269,7 @@ func diagnoseRuntimeInstallation(
 	if err != nil {
 		return err
 	}
-	if info, err := os.Stat(executable); err != nil || info.Mode()&0o111 == 0 {
+	if info, err := os.Stat(executable); err != nil || !platform.Runnable(info) {
 		return errors.New("Runtime 入口不存在或不可执行")
 	}
 	for key, path := range item.ContentRefs {

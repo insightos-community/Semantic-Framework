@@ -20,9 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -103,10 +101,8 @@ func (t *executeHostTool) Run(ctx context.Context, argsJSON string) (string, err
 	// 组长 PID 写入 Project 临时文件，取消时终止本次命令的整个进程组。
 	pidFile := filepath.Join(hostWorkdir, ".semantic-exec-"+uuid.NewString()+".pid")
 	defer func() { _ = os.Remove(pidFile) }()
-	innerCommand := "echo $$ > " + shellSingleQuote(pidFile) +
-		" && exec /bin/sh -c " + shellSingleQuote(args.Command)
-	command := "cd -- " + shellSingleQuote(hostWorkdir) +
-		" && " + hostSessionCommand() + shellSingleQuote(innerCommand)
+	command := platformHostCommand(hostWorkdir, pidFile, args.Command)
+
 	type backendResult struct {
 		response *filesystem.ExecuteResponse
 		err      error
@@ -146,17 +142,6 @@ func (t *executeHostTool) Run(ctx context.Context, argsJSON string) (string, err
 
 // killHostProcessGroup 读取本次命令的组长 PID 并终止整个进程组。PID 文件
 // 尚未生成表示命令还没进入用户 Shell，此时上游 CommandContext 已足够取消。
-func killHostProcessGroup(pidFile string) {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 1 {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-}
 
 // resolveHostWorkdir 同时进行词法和符号链接校验。宿主执行与容器不同，
 // workspace 内指向外部的符号链接必须拒绝，否则相对路径仍可能逃逸。

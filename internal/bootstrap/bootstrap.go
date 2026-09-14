@@ -18,10 +18,8 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	stopport "insightos.cn/semantic-framework/internal/ports/stop"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"insightos.cn/semantic-framework/internal/agent/runtime"
@@ -187,7 +185,10 @@ func (a *App) currentConfig() *config.Config {
 // server、全部 WS 连接与 store。
 func (a *App) Run(ctx context.Context) error {
 	// signal.NotifyContext 将信号转换为 ctx 取消，与调用方传入的 ctx 统一处理。
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	ctx, stop, err := stopport.NotifyContext(ctx)
+	if err != nil {
+		return err
+	}
 	defer stop()
 
 	// 启动聚合器：域模块发布到 TopicAgentEvents 的事件经归一化/分级/落库

@@ -21,12 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"insightos.cn/semantic-framework/internal/ports/platform"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 
@@ -238,7 +238,7 @@ func RuntimeRunnerExecutable(environmentPath, runner string) (string, error) {
 	default:
 		return "", fmt.Errorf("Runtime runner %q 不受支持", runner)
 	}
-	return filepath.Join(environmentPath, "bin", name), nil
+	return platform.VenvExecutable(environmentPath, name), nil
 }
 
 // RuntimeContentEnvironment 将安装时登记的只读内容转换为已知环境变量。
@@ -262,10 +262,7 @@ func RuntimeContentEnvironment(content map[string]string) ([]string, error) {
 		}
 		result = append(result, name+"="+value)
 	}
-	backend := "egl"
-	if runtime.GOOS == "darwin" {
-		backend = "cgl"
-	}
+	backend := platform.RenderBackend()
 	result = append(result, "MUJOCO_GL="+backend)
 	sort.Strings(result)
 	return result, nil

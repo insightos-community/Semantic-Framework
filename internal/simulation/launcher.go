@@ -19,8 +19,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	processport "insightos.cn/semantic-framework/internal/ports/process"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -63,15 +65,15 @@ func (l ExecLauncher) Start(_ context.Context) (RuntimeProcess, error) {
 	// 只能先唤醒 Server；Server 会依次让 Pilot/Ability 取得 hold 证据，最后
 	// 再通过 RuntimeSupervisor.Shutdown 停止本进程。若 Runtime 同时收到终端
 	// SIGINT，它会早于 Skill stop 退出，真实安全停止就只能得到连接拒绝。
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Dir = l.Dir
 	command.Env = append(os.Environ(), l.Env...)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	if err := command.Start(); err != nil {
+	tree, err := processport.Start(command)
+	if err != nil {
 		return nil, fmt.Errorf("%w: 启动 MuJoCo Runtime 失败: %v", ErrRuntimeUnavailable, err)
 	}
-	process := &execRuntimeProcess{command: command, done: make(chan struct{})}
+	process := &execRuntimeProcess{command: command, done: make(chan struct{}), tree: tree}
 	go func() {
 		err := command.Wait()
 		process.mu.Lock()
@@ -85,6 +87,7 @@ func (l ExecLauncher) Start(_ context.Context) (RuntimeProcess, error) {
 
 type execRuntimeProcess struct {
 	command *exec.Cmd
+	tree    *processport.Tree
 	done    chan struct{}
 
 	mu      sync.RWMutex
@@ -105,27 +108,27 @@ func (p *execRuntimeProcess) Stop(ctx context.Context) error {
 		p.mu.Unlock()
 		return normalizeExit(err)
 	}
-	process := p.command.Process
 	p.mu.Unlock()
 
 	// ExecLauncher为受管Runtime建立独立进程组。uv只是父进程，真正的
 	// plugin-mujoco在它的子进程中；只停止父进程会让Runtime继续占用端口。
 	// 这里仅向Framework自己创建的进程组发送信号，外部共享Runtime不会走本路径。
-	_ = syscall.Kill(-process.Pid, syscall.SIGINT)
+	defer p.tree.Close()
+	_ = p.tree.Interrupt()
 	select {
 	case <-p.done:
 		p.mu.RLock()
 		err := p.waitErr
 		p.mu.RUnlock()
-		return normalizeExit(err)
+		return controlledRuntimeExit(err)
 	case <-ctx.Done():
-		_ = syscall.Kill(-process.Pid, syscall.SIGKILL)
+		_ = p.tree.Kill()
 		select {
 		case <-p.done:
 			p.mu.RLock()
 			err := p.waitErr
 			p.mu.RUnlock()
-			return normalizeExit(err)
+			return controlledRuntimeExit(err)
 		case <-time.After(time.Second):
 			return ctx.Err()
 		}
@@ -150,4 +153,12 @@ func normalizeExit(err error) error {
 		}
 	}
 	return err
+}
+
+func controlledRuntimeExit(err error) error {
+	var exit *exec.ExitError
+	if runtime.GOOS == "windows" && errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return nil
+	}
+	return normalizeExit(err)
 }
