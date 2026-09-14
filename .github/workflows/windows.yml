@@ -55,8 +55,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Python installation failed' }
           $env:SEMANTIC_TEST_PYTHON = (uv python find --managed-python 3.13.15).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'Python lookup failed' }
-          go test -json ./internal/pilot -run '^(TestNativeOfflineSkillInstallation|TestListInstalledIncludesDisabledPackage)$' -count=1 -timeout=3m > windows-skill-installation.json
+          $env:SEMANTIC_TEST_UV = (Get-Command uv).Source
+          go test -json ./internal/pilot -run '^(TestNativeOfflineSkillInstallation|TestNativeOfflineSkillInstallationWithUV|TestListInstalledIncludesDisabledPackage)$' -count=1 -timeout=3m > windows-skill-installation.json
           if ($LASTEXITCODE -ne 0) { throw 'Skill installation failed' }
+          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+          $previous = (Get-ItemProperty $key).LongPathsEnabled
+          try {
+            Set-ItemProperty $key -Name LongPathsEnabled -Value 0
+            go test -json ./internal/pilot -run '^TestNativeOfflineSkillInstallationWithUV$' -count=1 -timeout=3m > windows-skill-no-long-paths.json
+            if ($LASTEXITCODE -ne 0) { throw 'Offline Skill installation without system long-path support failed' }
+          } finally { Set-ItemProperty $key -Name LongPathsEnabled -Value $previous }
+
       - name: Package development executables
         run: Compress-Archive -Path .output/bin/* -DestinationPath semantic-framework-windows-amd64-development.zip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -69,4 +78,5 @@ jobs:
             windows-host-tests.json
             windows-runtime-pack.json
             windows-skill-installation.json
+            windows-skill-no-long-paths.json
           if-no-files-found: error

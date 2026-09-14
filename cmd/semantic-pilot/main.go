@@ -144,7 +144,8 @@ func runPermanentContext(ctx context.Context, profilePath, serverWS, serverHTTP,
 		wheelhouse = filepath.Dir(skillSDK)
 	}
 	installer := pilot.VenvSkillInstaller{BaseDirectory: filepath.Join(skillStorage, "environments"),
-		PythonExecutable: python, SDKSource: skillSDK, Wheelhouse: wheelhouse}
+		PythonExecutable: python, SDKSource: skillSDK, Wheelhouse: wheelhouse,
+		UVExecutable: os.Getenv("SEMANTIC_SKILL_UV"), EnvironmentRoot: os.Getenv("SEMANTIC_SKILL_ENV_ROOT")}
 	supervisor := pilot.WorkerSupervisor{Installer: installer, PythonExecutable: python,
 		OnStderrLine: func(line string) { logger.Warn("Robot Skill Worker stderr", "line", line) }}
 	agent := pilot.NewRemoteAgentGateway(nil)
