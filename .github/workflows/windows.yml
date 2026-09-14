@@ -43,6 +43,8 @@ jobs:
         run: go test -json ./internal/ports/... -count=1 -timeout=4m > windows-contracts.json
       - name: PowerShell execution, permission gates and cancellation
         run: go test -json ./internal/tool/builtin -run 'TestExecuteHost|TestWindowsHost' -count=1 -timeout=3m > windows-host-tests.json
+      - name: Runtime pack integrity and native content paths
+        run: go test -json ./internal/simulation -run 'TestRuntimePack|TestRuntimeContentEnvironmentNativePaths' -count=1 -timeout=3m > windows-runtime-pack.json
       - name: Package development executables
         run: Compress-Archive -Path .output/bin/* -DestinationPath semantic-framework-windows-amd64-development.zip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -53,4 +55,5 @@ jobs:
             semantic-framework-windows-amd64-development.zip
             windows-contracts.json
             windows-host-tests.json
+            windows-runtime-pack.json
           if-no-files-found: error
