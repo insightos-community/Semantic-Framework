@@ -24,10 +24,10 @@ jobs:
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
-          Invoke-WebRequest 'https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-msvcrt-x86_64.zip' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne '341cc9786b54956467ac19a02fdb00749307eac133da56108f643e4189db810b') { throw 'Compiler SHA-256 mismatch' }
+          Invoke-WebRequest 'https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-x86_64.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne '1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6') { throw 'Compiler SHA-256 mismatch' }
           Expand-Archive $archive $env:RUNNER_TEMP
-          "$env:RUNNER_TEMP/llvm-mingw-20260908-msvcrt-x86_64/bin" >> $env:GITHUB_PATH
+          "$env:RUNNER_TEMP/llvm-mingw-20260908-ucrt-x86_64/bin" >> $env:GITHUB_PATH
           'CC=x86_64-w64-mingw32-clang' >> $env:GITHUB_ENV
           'CXX=x86_64-w64-mingw32-clang++' >> $env:GITHUB_ENV
       - name: Build native CLI, server and Pilot
