@@ -40,8 +40,7 @@ import (
 )
 
 const (
-	managedRobotReadinessTimeout = 2 * time.Minute
-	managedRobotShutdownTimeout  = 45 * time.Second
+	managedRobotShutdownTimeout = 45 * time.Second
 )
 
 type robotInstanceConfig struct {

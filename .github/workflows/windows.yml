@@ -55,7 +55,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Python installation failed' }
           $env:SEMANTIC_TEST_PYTHON = (uv python find --managed-python 3.13.15).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'Python lookup failed' }
-          go test -json ./internal/pilot -run '^TestNativeOfflineSkillInstallation$' -count=1 -timeout=3m > windows-skill-installation.json
+          go test -json ./internal/pilot -run '^(TestNativeOfflineSkillInstallation|TestListInstalledIncludesDisabledPackage)$' -count=1 -timeout=3m > windows-skill-installation.json
           if ($LASTEXITCODE -ne 0) { throw 'Skill installation failed' }
       - name: Package development executables
         run: Compress-Archive -Path .output/bin/* -DestinationPath semantic-framework-windows-amd64-development.zip
