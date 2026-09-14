@@ -59,16 +59,13 @@ func ScanSkillCatalog(root string) (*SkillCatalog, error) {
 	}
 	catalog := &SkillCatalog{byName: make(map[string]SkillDefinition)}
 	for _, entry := range entries {
-		info, infoErr := os.Stat(filepath.Join(root, entry.Name()))
-		if infoErr != nil {
-			return nil, infoErr
+		directory, err := activeSkillDirectory(root, entry)
+		if err != nil {
+			return nil, err
 		}
-		// active/<name> 是原子切换后的符号链接。只跟随这一层目录链接，
-		// SKILL.md 内部仍由 LoadSkillDefinition 拒绝非预期文件结构。
-		if !info.IsDir() {
+		if directory == "" {
 			continue
 		}
-		directory := filepath.Join(root, entry.Name())
 		document := filepath.Join(directory, "SKILL.md")
 		if _, err := os.Stat(document); err != nil {
 			if os.IsNotExist(err) {

@@ -65,13 +65,45 @@ stop_actions:
 	if len(actual) != 1 || actual[0].Definition.Name != "grasp-object" || actual[0].Enabled {
 		t.Fatalf("disabled package snapshot=%#v", actual)
 	}
-	definition, err := LoadSkillDefinition(root)
+	_, err := LoadSkillDefinition(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog.Install(definition)
+	if _, err := manager.Enable("grasp-object", "0.2.0"); err != nil {
+		t.Fatal(err)
+	}
+	// Replacing an already active version must also work on Windows.
+	if _, err := manager.Enable("grasp-object", "0.2.0"); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := ScanSkillCatalog(filepath.Join(base, "active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloaded.Resolve("grasp-object", "0.2.0"); err != nil {
+		t.Fatal(err)
+	}
 	actual = manager.ListInstalled()
 	if len(actual) != 1 || !actual[0].Enabled {
 		t.Fatalf("enabled package snapshot=%#v", actual)
+	}
+	if err := manager.Disable("grasp-object", "other-version"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := catalog.Resolve("grasp-object", "0.2.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Disable("grasp-object", "0.2.0"); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err = ScanSkillCatalog(filepath.Join(base, "active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.List()) != 0 {
+		t.Fatal("disabled skill reappeared after restart")
+	}
+	if _, err := LoadSkillDefinition(root); err != nil {
+		t.Fatal("disabling removed package:", err)
 	}
 }

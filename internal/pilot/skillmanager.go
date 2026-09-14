@@ -134,25 +134,8 @@ func (m *InstalledSkillManager) Enable(name, version string) (SkillDefinition, e
 	if err != nil {
 		return SkillDefinition{}, err
 	}
-	activeRoot := filepath.Join(m.BaseDirectory, "active")
-	if err := os.MkdirAll(activeRoot, 0o750); err != nil {
+	if err := activateSkill(m.BaseDirectory, name, version, root); err != nil {
 		return SkillDefinition{}, err
-	}
-	link := filepath.Join(activeRoot, safePilotSegment(name))
-	temp := link + ".next"
-	_ = os.Remove(temp)
-	if err := os.Symlink(root, temp); err != nil {
-		return SkillDefinition{}, err
-	}
-	if err := os.Rename(temp, link); err != nil {
-		if !errors.Is(err, os.ErrExist) {
-			_ = os.Remove(temp)
-			return SkillDefinition{}, err
-		}
-		_ = os.Remove(link)
-		if err := os.Rename(temp, link); err != nil {
-			return SkillDefinition{}, err
-		}
 	}
 	m.Catalog.Install(definition)
 	return definition, nil
@@ -165,11 +148,7 @@ func (m *InstalledSkillManager) Disable(name, version string) error {
 	if err := m.Catalog.Remove(name, version); err != nil && !errors.Is(err, ErrSkillInvalid) {
 		return err
 	}
-	link := filepath.Join(m.BaseDirectory, "active", safePilotSegment(name))
-	if target, err := os.Readlink(link); err == nil && strings.Contains(target, safePilotSegment(version)) {
-		return os.Remove(link)
-	}
-	return nil
+	return deactivateSkill(m.BaseDirectory, name, version)
 }
 
 func (m *InstalledSkillManager) Uninstall(name, version string) error {
