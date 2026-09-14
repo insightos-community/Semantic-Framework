@@ -78,11 +78,10 @@ func (i VenvSkillInstaller) Prepare(ctx context.Context, definition SkillDefinit
 	if output, err := exec.CommandContext(ctx, python, "-m", "venv", "--system-site-packages", environment).CombinedOutput(); err != nil {
 		return PreparedSkillEnvironment{}, fmt.Errorf("create skill venv: %w: %s", err, output)
 	}
-	pip := filepath.Join(environment, "bin", "pip")
-	if output, err := exec.CommandContext(ctx, pip, i.installArgs(i.SDKSource)...).CombinedOutput(); err != nil {
+	if output, err := exec.CommandContext(ctx, venvPython, append([]string{"-m", "pip"}, i.installArgs(i.SDKSource)...)...).CombinedOutput(); err != nil {
 		return PreparedSkillEnvironment{}, fmt.Errorf("install robot skill sdk: %w: %s", err, output)
 	}
-	if output, err := exec.CommandContext(ctx, pip, i.installArgs("-r", lockFile)...).CombinedOutput(); err != nil {
+	if output, err := exec.CommandContext(ctx, venvPython, append([]string{"-m", "pip"}, i.installArgs("-r", lockFile)...)...).CombinedOutput(); err != nil {
 		return PreparedSkillEnvironment{}, fmt.Errorf("install skill requirements: %w: %s", err, output)
 	}
 	if err := os.WriteFile(ready, []byte(definition.Name+"@"+definition.Version+"\n"), 0o644); err != nil {
