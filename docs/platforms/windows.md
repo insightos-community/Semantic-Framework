@@ -5,7 +5,9 @@ Target: Windows x64, with Go 1.25.8. The native Windows workflow builds
 an Actions development artifact. This is not a complete product installer.
 
 ```powershell
-$env:CGO_ENABLED = '0'
+# Use MinGW-w64 GCC on PATH; MuPDF is linked from its bundled Windows archives.
+$env:CGO_ENABLED = '1'
+$env:GOFLAGS = '-ldflags=-extldflags=-static'
 go build -o .output/bin/semantic.exe ./cmd/semantic
 go build -o .output/bin/semantic-server.exe ./cmd/semantic-server
 go build -o .output/bin/semantic-pilot.exe ./cmd/semantic-pilot
