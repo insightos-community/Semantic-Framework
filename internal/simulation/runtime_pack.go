@@ -168,7 +168,7 @@ func (m RuntimePackManifest) Validate() error {
 		seen[file.Path] = true
 	}
 	for key, requirement := range m.ContentRequirements {
-		if _, err := RuntimeContentEnvironment(map[string]string{key: "/content"}); err != nil {
+		if _, err := runtimeContentEnvironmentName(key); err != nil {
 			return err
 		}
 		if !requirement.Required && requirement.Revision == "" &&
@@ -241,9 +241,7 @@ func RuntimeRunnerExecutable(environmentPath, runner string) (string, error) {
 	return platform.VenvExecutable(environmentPath, name), nil
 }
 
-// RuntimeContentEnvironment 将安装时登记的只读内容转换为已知环境变量。
-// 未知 key 会被拒绝，避免 manifest 或网页构造任意子进程环境。
-func RuntimeContentEnvironment(content map[string]string) ([]string, error) {
+func runtimeContentEnvironmentName(key string) (string, error) {
 	known := map[string]string{
 		"mujoco_assets":     "MUJOCO_ASSET_ROOT",
 		"r1pro_model":       "R1PRO_MODEL_ROOT",
@@ -251,11 +249,22 @@ func RuntimeContentEnvironment(content map[string]string) ([]string, error) {
 		"libero_source":     "SEMANTIC_LIBERO_ROOT",
 		"libero_pro_source": "SEMANTIC_LIBERO_PRO_ROOT",
 	}
+	name, ok := known[key]
+	if !ok {
+		return "", fmt.Errorf("未知 Runtime content_ref: %s", key)
+	}
+	return name, nil
+}
+
+// RuntimeContentEnvironment 将安装时登记的只读内容转换为已知环境变量。
+// 未知 key 会被拒绝，避免 manifest 或网页构造任意子进程环境。
+func RuntimeContentEnvironment(content map[string]string) ([]string, error) {
+
 	result := make([]string, 0, len(content)+1)
 	for key, value := range content {
-		name, ok := known[key]
-		if !ok {
-			return nil, fmt.Errorf("未知 Runtime content_ref: %s", key)
+		name, err := runtimeContentEnvironmentName(key)
+		if err != nil {
+			return nil, err
 		}
 		if strings.TrimSpace(value) == "" || !filepath.IsAbs(value) {
 			return nil, fmt.Errorf("Runtime content_ref %s 必须是绝对路径", key)

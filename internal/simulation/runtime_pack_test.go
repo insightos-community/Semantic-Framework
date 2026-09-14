@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -76,6 +77,11 @@ func TestRuntimePackStrictIntegrityAndContentRequirements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("有效 Pack 无法加载: %v", err)
 	}
+	loaded.ContentRequirements["PATH"] = RuntimeContentRequirement{Required: true}
+	if err := loaded.Validate(); err == nil {
+		t.Fatal("Pack must reject unknown content requirements")
+	}
+	delete(loaded.ContentRequirements, "PATH")
 	if loaded.Runner != "native-mujoco" || len(loaded.Files()) != 7 {
 		t.Fatalf("manifest=%+v", loaded)
 	}
@@ -102,5 +108,18 @@ func TestRuntimePackRejectsUnknownContentAndArbitraryRunner(t *testing.T) {
 	}
 	if _, err := RuntimeContentEnvironment(map[string]string{"PATH": "/tmp"}); err == nil {
 		t.Fatal("未知 content_ref 不得转换为子进程环境")
+	}
+}
+
+func TestRuntimeContentEnvironmentNativePaths(t *testing.T) {
+	absolute := filepath.Join(t.TempDir(), "语义 assets")
+	env, err := RuntimeContentEnvironment(map[string]string{"mujoco_assets": absolute})
+	if err != nil || !slices.Contains(env, "MUJOCO_ASSET_ROOT="+absolute) {
+		t.Fatalf("native absolute content path: env=%v err=%v", env, err)
+	}
+	for _, value := range []string{"", "assets", filepath.Join("..", "assets")} {
+		if _, err := RuntimeContentEnvironment(map[string]string{"mujoco_assets": value}); err == nil {
+			t.Fatalf("accepted non-absolute content path %q", value)
+		}
 	}
 }
