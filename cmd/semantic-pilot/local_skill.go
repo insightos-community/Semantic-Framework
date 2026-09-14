@@ -21,13 +21,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	stopport "insightos.cn/semantic-framework/internal/ports/stop"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"insightos.cn/semantic-framework/internal/pilot"
@@ -179,7 +178,10 @@ func runLocalSkillCommand(arguments []string) error {
 		events,
 	)
 
-	runContext, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	runContext, stopSignal, stopErr := stopport.NotifyContext(context.Background())
+	if stopErr != nil {
+		return stopErr
+	}
 	defer stopSignal()
 	if *timeout > 0 {
 		var cancel context.CancelFunc

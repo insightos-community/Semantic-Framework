@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build linux
 
 // Copyright 2026 InsightOS
 // SPDX-License-Identifier: Apache-2.0

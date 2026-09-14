@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"insightos.cn/semantic-framework/internal/ports/platform"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,7 +63,7 @@ func (i VenvSkillInstaller) Prepare(ctx context.Context, definition SkillDefinit
 		python = "python"
 	}
 	environment := filepath.Join(i.BaseDirectory, definition.Name, definition.Version)
-	venvPython := filepath.Join(environment, "bin", "python")
+	venvPython := platform.VenvExecutable(environment, "python")
 	ready := filepath.Join(environment, ".semantic-ready")
 	if _, err := os.Stat(ready); err == nil {
 		return PreparedSkillEnvironment{PythonExecutable: venvPython}, nil

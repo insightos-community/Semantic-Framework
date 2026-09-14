@@ -20,12 +20,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"insightos.cn/semantic-framework/internal/ports/platform"
+	processport "insightos.cn/semantic-framework/internal/ports/process"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -148,8 +149,8 @@ func (l *managedRobotInstanceLauncher) Start(
 	ctx context.Context,
 	request robotruntime.LaunchRequest,
 ) (robotruntime.LaunchResult, error) {
-	launcher := filepath.Join(request.Bundle.Path, "bin", "semantic-robot-instance")
-	if info, err := os.Stat(launcher); err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+	launcher := filepath.Join(request.Bundle.Path, "bin", platform.Executable("semantic-robot-instance"))
+	if info, err := os.Stat(launcher); err != nil || !platform.Runnable(info) {
 		return robotruntime.LaunchResult{}, fmt.Errorf("Robot Runtime launcher 不可执行: %s", launcher)
 	}
 	if err := l.ensureRendered(ctx, launcher, request); err != nil {
@@ -164,7 +165,6 @@ func (l *managedRobotInstanceLauncher) Start(
 	// Server 和实例 supervisor 不能共享终端进程组。Ctrl-C 只应唤醒 Server，
 	// 再由 App.shutdown 调用 Orchestrator.Stop；若两者同时收到信号，Pilot 与
 	// AbilityFramework 会和 supervisor 竞争退出，留下 stopping 状态与孤儿进程。
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Dir = request.Instance.DataDirectory
 	command.Stdout = logFile
 	command.Stderr = logFile
@@ -174,7 +174,8 @@ func (l *managedRobotInstanceLauncher) Start(
 		return robotruntime.LaunchResult{}, envErr
 	}
 	command.Env = env
-	if err := command.Start(); err != nil {
+	tree, err := processport.Start(command)
+	if err != nil {
 		_ = logFile.Close()
 		return robotruntime.LaunchResult{}, fmt.Errorf("启动 Robot instance supervisor: %w", err)
 	}
@@ -184,6 +185,7 @@ func (l *managedRobotInstanceLauncher) Start(
 	l.mu.Unlock()
 	go func() {
 		waitErr := command.Wait()
+		_ = tree.Close()
 		_ = logFile.Close()
 		process.done <- waitErr
 		close(process.done)
@@ -541,12 +543,12 @@ func (l *managedRobotInstanceLauncher) ReclaimInterruptedSimulation(
 	// 这里仍然只发送 SIGTERM，并按 Pilot→AbilityFramework 的顺序等待精确进程组
 	// 退出；不使用 SIGKILL，也绝不能把这条恢复路径用于真机或远程 Runtime。
 	if err := terminateManagedProcessGroup(
-		ctx, state.PilotPID, filepath.Join(bundleRoot, "bin", "semantic-pilot"),
+		ctx, state.PilotPID, filepath.Join(bundleRoot, "bin", platform.Executable("semantic-pilot")),
 	); err != nil {
 		return robotruntime.StopEvidence{}, fmt.Errorf("停止遗留 Pilot: %w", err)
 	}
 	if err := terminateManagedProcessGroup(
-		ctx, state.AbilityFrameworkPID, filepath.Join(bundleRoot, "bin", "AbilityFramework"),
+		ctx, state.AbilityFrameworkPID, filepath.Join(bundleRoot, "bin", platform.Executable("AbilityFramework")),
 	); err != nil {
 		return robotruntime.StopEvidence{}, fmt.Errorf("停止遗留 AbilityFramework: %w", err)
 	}
@@ -560,39 +562,6 @@ func (l *managedRobotInstanceLauncher) ReclaimInterruptedSimulation(
 		"orphan_processes_stopped": true,
 		"reason":                   reason,
 	}}, nil
-}
-
-func terminateManagedProcessGroup(ctx context.Context, pid int, expectedExecutable string) error {
-	running, err := managedExecutableRunning(pid, expectedExecutable)
-	if err != nil || !running {
-		return err
-	}
-	processGroupID, err := syscall.Getpgid(pid)
-	if err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		return err
-	}
-	if processGroupID != pid {
-		return fmt.Errorf("PID %d 不是独立受管进程组", pid)
-	}
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		running, err = managedExecutableRunning(pid, expectedExecutable)
-		if err != nil || !running {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
-	}
 }
 
 func managedExecutableRunning(pid int, expectedExecutable string) (bool, error) {
@@ -610,7 +579,7 @@ func managedExecutableRunning(pid int, expectedExecutable string) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	if actual != expected {
+	if !platform.SamePath(actual, expected) {
 		return false, fmt.Errorf("PID %d executable不属于目标实例: %s", pid, actual)
 	}
 	return true, nil
@@ -630,7 +599,7 @@ func instanceLauncherFromData(dataDirectory string) (string, error) {
 	if strings.TrimSpace(metadata.BundleRoot) == "" {
 		return "", errors.New("Robot instance bundle metadata 缺少 bundle_root")
 	}
-	return filepath.Join(metadata.BundleRoot, "bin", "semantic-robot-instance"), nil
+	return filepath.Join(metadata.BundleRoot, "bin", platform.Executable("semantic-robot-instance")), nil
 }
 
 func managedInstanceAlreadyGone(dataDirectory, reason string) (bool, robotruntime.StopEvidence) {

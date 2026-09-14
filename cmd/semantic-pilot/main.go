@@ -23,11 +23,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	stopport "insightos.cn/semantic-framework/internal/ports/stop"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -70,7 +69,10 @@ func main() {
 
 func runPermanent(profilePath, serverWS, serverHTTP, accessToken, pilotID, dataDir,
 	skillStorage, skillSDK, skillWheelhouse, python, pilotVersion string) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop, err := stopport.NotifyContext(context.Background())
+	if err != nil {
+		return err
+	}
 	defer stop()
 	return runPermanentContext(ctx, profilePath, serverWS, serverHTTP, accessToken, pilotID,
 		dataDir, skillStorage, skillSDK, skillWheelhouse, python, pilotVersion)
