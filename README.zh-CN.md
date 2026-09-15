@@ -23,6 +23,12 @@ InsightOS Semantic 支持售货仓取货配送、拆码垛搬运、多机协同�
 
 本仓库是 **InsightOS Semantic 的产品主仓与 Framework 实现**：`semantic-server` 管理项目、任务、注册表和 Runtime 调度，`semantic-pilot` 连接机器人执行环境，`semantic` CLI 提供配置和 Runtime 管理。完整系统还包含独立仓库中的 Studio、机器人技能与仿真组件。组织与生态入口见 [InsightOS Community](https://github.com/insightos-community)。
 
+## 基于 Eino 构建
+
+Semantic Framework 基于 [Eino](https://github.com/cloudwego/eino) 开发。Eino 是 CloudWeGo 开源的 Go 语言大模型应用开发框架；本项目的智能体层使用其 Agent Development Kit（ADK）、模型接口与工具编排能力，并通过 [EinoExt](https://github.com/cloudwego/eino-ext) 集成模型提供商。本仓库使用的具体依赖版本见 [go.mod](go.mod)。
+
+感谢 CloudWeGo Eino 社区提供的基础框架与组件。
+
 ## 为什么选择 Semantic？
 
 机器人从“能演示”走向“能干活”，通常面临三类问题：

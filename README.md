@@ -24,6 +24,12 @@ InsightOS Semantic supports scenarios including warehouse picking and delivery, 
 
 This is the **product home and Framework implementation for InsightOS Semantic**. `semantic-server` manages projects, tasks, registries, and runtime coordination; `semantic-pilot` connects robot execution environments; the `semantic` CLI provides configuration and runtime management. The complete system also includes Studio, robot skills, and simulation components maintained in separate repositories. Visit [InsightOS Community](https://github.com/insightos-community) for the organization and ecosystem overview.
 
+## Built With
+
+Semantic Framework is built with [Eino](https://github.com/cloudwego/eino), CloudWeGo's Go framework for LLM application development. The agent layer uses Eino's Agent Development Kit (ADK), model interfaces, and tool orchestration, with model-provider integrations from [EinoExt](https://github.com/cloudwego/eino-ext). See [go.mod](go.mod) for the dependency versions used by this repository.
+
+Thanks to the CloudWeGo Eino community for these foundational libraries.
+
 ## Why Semantic?
 
 Moving from demonstrations to real work presents robots with three challenges:
