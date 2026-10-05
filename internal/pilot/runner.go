@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
@@ -204,7 +189,9 @@ func (r *Runner) Stop(ctx context.Context, executionID, reason string) (ActionEx
 	if err != nil {
 		return ActionExecution{}, ErrExecutionNotFound
 	}
-	if actionTerminal(execution.Status) {
+	// interrupted 表示物理结果未知，必须允许用户对原 invocation 重试停止；
+	// 它禁止动作重放，但不禁止停止，否则物理锁将永远无法正常释放。
+	if actionTerminal(execution.Status) && execution.Status != ActionInterrupted {
 		return execution, nil
 	}
 	execution.Status = ActionStopping
@@ -217,6 +204,13 @@ func (r *Runner) Stop(ctx context.Context, executionID, reason string) (ActionEx
 		return r.markInterrupted(execution, "STOP_UNCONFIRMED", err.Error()), err
 	}
 	return r.applyAbilityState(execution, state), nil
+}
+
+// physicalOwner 返回尚未确认结束的物理 Action，供 Skill 保留执行归属和停止入口。
+func (r *Runner) physicalOwner(robotID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.activePhysical[robotID]
 }
 
 // ConfirmInterrupted 只供人工或设备侧确认现场后调用；确认前 Robot 锁保持占用。

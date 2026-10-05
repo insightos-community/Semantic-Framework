@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package kernel
 
 import (
@@ -53,6 +38,13 @@ type ToolCallGuard interface {
 	// WrapToolCall 包装一次工具调用：meta 为调用元数据，argsJSON 为参数
 	// JSON 文本，next 为放行后的执行端点。
 	WrapToolCall(ctx context.Context, meta ToolCallMeta, argsJSON string, next ToolCallEndpoint) (string, error)
+}
+
+// ModelRoundGuard is optional on ToolPolicy. It runs once before each logical
+// model exchange, after the preceding tool batch has finished. Network retries
+// of that same exchange are not new feedback rounds. It must never replay tools.
+type ModelRoundGuard interface {
+	BeforeModelRound(context.Context) error
 }
 
 // InterruptToolCall 在工具调用路径上发起中断：暂停当前 run 并把断点

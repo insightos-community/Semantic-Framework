@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package main
 
 import (
@@ -23,7 +8,7 @@ import (
 	"time"
 
 	"insightos.cn/semantic-framework/internal/store"
-	"insightos.cn/semantic-framework/pkg/config"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/log"
 )
 
@@ -32,15 +17,7 @@ import (
 func openPerfTestStore(t *testing.T) (string, time.Time) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "perf.db")
-	st, err := store.Open(config.StoreConfig{Driver: "sqlite", SQLitePath: dbPath},
-		log.New(log.Options{Level: log.LevelError, Writer: io.Discard}))
-	if err != nil {
-		t.Fatalf("Open 失败: %v", err)
-	}
-	defer func() { _ = st.Close() }()
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate 失败: %v", err)
-	}
+	st := storetest.OpenMigratedAt(t, log.New(log.Options{Level: log.LevelError, Writer: io.Discard}), dbPath)
 
 	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
 	for _, sp := range []store.Span{
@@ -137,14 +114,7 @@ func TestBuildReport(t *testing.T) {
 // TestBuildReportEmptyDB 空库（已迁移、无记录）报告应渲染空形态而不报错。
 func TestBuildReportEmptyDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "empty.db")
-	st, err := store.Open(config.StoreConfig{Driver: "sqlite", SQLitePath: dbPath},
-		log.New(log.Options{Level: log.LevelError, Writer: io.Discard}))
-	if err != nil {
-		t.Fatalf("Open 失败: %v", err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate 失败: %v", err)
-	}
+	st := storetest.OpenMigratedAt(t, log.New(log.Options{Level: log.LevelError, Writer: io.Discard}), dbPath)
 	_ = st.Close()
 
 	report, err := buildReport(dbPath, time.Now().UTC())

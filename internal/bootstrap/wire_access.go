@@ -1,28 +1,17 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"insightos.cn/semantic-framework/internal/agent/kernel"
 	"insightos.cn/semantic-framework/internal/event"
+	"insightos.cn/semantic-framework/internal/install"
 	"insightos.cn/semantic-framework/internal/mcpregistry"
 	robotdomain "insightos.cn/semantic-framework/internal/robot"
 	"insightos.cn/semantic-framework/internal/server/aggregate"
@@ -79,6 +68,12 @@ func WireWithOptions(cfg *config.Config, logger *log.Logger, opts Options) (*App
 
 	// ② 认证服务与种子用户（保证零配置启动后存在可登录账号）。
 	authSvc := auth.NewService(st, logger)
+	if cfg.Server.AccessTokenTTL != 0 {
+		if err := authSvc.SetTokenTTL(time.Duration(cfg.Server.AccessTokenTTL)); err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("用户令牌有效期配置失败: %w", err)
+		}
+	}
 	if err := authSvc.SeedAdmin(); err != nil {
 		_ = st.Close()
 		return nil, fmt.Errorf("种子用户初始化失败: %w", err)
@@ -163,6 +158,7 @@ func WireWithOptions(cfg *config.Config, logger *log.Logger, opts Options) (*App
 		return nil, err
 	}
 	agentRT.SetDirectRobotLifecycle(robotService)
+	agentRT.SetRobotSkillContracts(robotService)
 	if err := agentRT.RecoverInterruptedRuns(time.Now().UTC()); err != nil {
 		stopSkillStore(skillStore)
 		_ = st.Close()
@@ -207,7 +203,11 @@ func WireWithOptions(cfg *config.Config, logger *log.Logger, opts Options) (*App
 		_ = st.Close()
 		return nil, fmt.Errorf("装配受管 Robot Runtime 失败: %w", err)
 	}
-	simulationSvc.ConfigureRobotLifecycle(robotLifecycle)
+	// 仅安装 Runtime/场景时可关闭 Robot 调度。typed nil 转为接口后并不等于 nil，
+	// 因而必须在装配点决定是否注册，避免场景加载成功后异步调用空生命周期。
+	if robotLifecycle != nil {
+		simulationSvc.ConfigureRobotLifecycle(robotLifecycle)
+	}
 	robotService.SetRobotStateReader("simulation.robot_state", func(ctx context.Context,
 		projectID, sceneInstanceID, robotID string) (robotdomain.StateObservation, error) {
 		state, err := simulationSvc.RobotState(ctx, projectID, sceneInstanceID, robotID)
@@ -266,6 +266,25 @@ func WireWithOptions(cfg *config.Config, logger *log.Logger, opts Options) (*App
 		mcpSyncer:     mcpSyncer,
 	}
 	app.settingsCtl = newSettingsController(app, logger)
+	simulationHandler.SetResourceReload(func(ctx context.Context) error {
+		return simulationSvc.ReloadResources(ctx, cfg.Simulation.RuntimesDir, cfg.Simulation.CatalogDir)
+	}, func(ctx context.Context, id string) error {
+		item, err := simulationSvc.RuntimeInstallation(id)
+		if err != nil {
+			return err
+		}
+		if err := simulationSvc.CheckRuntimeInstallIdle(ctx, item.Profile.RuntimeProfileID); err != nil {
+			return err
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if err := install.RunCommand(ctx, func(string) {}, filepath.Join(filepath.Dir(executable), "semantic"), "runtime", "uninstall", "--id", id, "-c", app.settingsCtl.ConfigPath()); err != nil {
+			return err
+		}
+		return simulationSvc.ReloadResources(ctx, cfg.Simulation.RuntimesDir, cfg.Simulation.CatalogDir)
+	})
 	settingsHandler := handlers.NewSettingsHandler(st, llmReg, app.settingsCtl, logger)
 	agentsHandler := handlers.NewAgentsHandler(agentRT)
 	// 技能库经 provider 读 runtime 持有的当前 store（带锁）：skills.dir
@@ -275,6 +294,52 @@ func WireWithOptions(cfg *config.Config, logger *log.Logger, opts Options) (*App
 	projectsHandler := handlers.NewProjectsHandler(st, agentRT, logger, bus)
 	projectsHandler.SetWorkflowApplication(workflowSvc)
 	projectsHandler.SetSimulationLifecycle(simulationSvc)
+	app.imports = install.NewInbox(st, func(ctx context.Context, projectID string, pkg install.Package, data []byte) ([]string, error) {
+		project, err := st.GetProject(projectID)
+		if err != nil {
+			return nil, err
+		}
+		if project.ArchivedAt != nil || project.Mode != store.ProjectModeDevelopment {
+			return nil, fmt.Errorf("项目当前不在开发模式")
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		switch pkg.Kind {
+		case "robot_skill":
+			item, err := robotService.PublishSkillArchive(bytes.NewReader(data))
+			if err != nil {
+				return nil, err
+			}
+			return []string{item.Name + "@" + item.Version}, nil
+		case "scene":
+			profile, err := simulationSvc.ProjectRuntimeProfile(projectID)
+			if err != nil {
+				return nil, err
+			}
+			documents, err := sceneAuthoringSvc.ImportScenePackage(projectID, profile.RuntimeProfileID, data)
+			if err != nil {
+				return nil, err
+			}
+			ids := make([]string, 0, len(documents))
+			for _, document := range documents {
+				ids = append(ids, document.ID)
+			}
+			return ids, nil
+		default:
+			return nil, fmt.Errorf("尚未支持的包类型: %s", pkg.Kind)
+		}
+	})
+	projectsHandler.SetImports(app.imports)
+	app.components = &install.ComponentStore{Root: filepath.Join(cfg.RobotRuntime.DataRoot, "installations")}
+	projectsHandler.SetComponents(app.components, componentRemovalCheck(app, cfg, st, simulationSvc))
+	projectsHandler.SetComponentApply(func(ctx context.Context, projectID, robotID string) error {
+		if app.managedRobots == nil {
+			return fmt.Errorf("当前未启用受管 Robot")
+		}
+		return app.managedRobots.applyInstalledComponents(ctx, projectID, robotID, simulationSvc)
+	})
+	app.imports.SetInstaller(componentInstaller(app, cfg, st, robotService, simulationSvc))
 	robotsHandler := handlers.NewRobotsHandler(robotService, st)
 
 	app.httpServer = &http.Server{

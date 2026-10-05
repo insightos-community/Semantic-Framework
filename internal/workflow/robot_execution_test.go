@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package workflow
 
 import (
@@ -293,8 +278,150 @@ func TestFailedPhysicalExecutionWaitsForReconciliationWithoutRecovery(t *testing
 	}
 	select {
 	case replay := <-executor.started:
-		t.Fatalf("状态未知时不得自动重放完整Robot Skill: %+v", replay)
+		t.Fatalf("状态未知时不得自动重放完整 Robot Skill: %+v", replay)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestFailedPhysicalExecutionWithHoldEvidenceStopsWorkflow(t *testing.T) {
+	st, project, conversation, service, _, executor := newWorkflowFixture(t)
+	view, task, subTasks := prepareRunningRobotTask(t, st, project, conversation,
+		[]store.SubTaskDraft{{ID: "sub-held", Kind: "robot_skill", Goal: "抓取"}})
+	now := time.Now().UTC()
+	// 与策略超时现场一致：Skill 失败结束，但 Ability 撤销执行后已核对 hold，
+	// 把 safe 证据写进了该次 Action 的 result。
+	execution := store.RobotExecution{ID: "rex-failed-held", ProjectID: project.ID,
+		WorkflowID: view.Workflow.ID, TaskID: task.ID, SubtaskID: subTasks[0].ID,
+		RobotID: "r1pro-test", SkillName: "vla-manipulation", SkillVersion: "0.1.7",
+		Status: "failed", Error: map[string]any{"code": "policy_timeout"},
+		Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := st.SaveRobotExecution(execution); err != nil {
+		t.Fatal(err)
+	}
+	for sequence, event := range []struct {
+		kind    string
+		payload map[string]any
+	}{
+		{"action.started", map[string]any{"action_id": "policy", "physical": true, "physical_started": true}},
+		{"action.terminal", map[string]any{"action_id": "policy", "status": "failed",
+			"result": map[string]any{"safe": true, "physical_state": "hold", "hold_confirmed": true},
+			"error":  map[string]any{"code": "policy_timeout"}}},
+	} {
+		if err := st.AppendRobotExecutionEvent(store.RobotExecutionEvent{
+			ExecutionID: execution.ID, Sequence: int64(sequence + 1),
+			Type: event.kind, Payload: event.payload, CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.OnRobotExecutionChanged(context.Background(), execution,
+		"execution.failed", execution.Error); err != nil {
+		t.Fatal(err)
+	}
+	stoppedWorkflow, _ := st.GetWorkflow(view.Workflow.ID)
+	stoppedTask, _ := st.GetTask(task.ID)
+	stoppedSubTask, _ := st.GetSubTask(subTasks[0].ID)
+	if stoppedWorkflow.Status != store.WorkflowStatusStopped ||
+		stoppedTask.Status != store.TaskStatusStopped ||
+		stoppedSubTask.Status != store.TaskStatusStopped {
+		t.Fatalf("失败但已安全保持必须直接收敛 stopped: workflow=%+v task=%+v subtask=%+v",
+			stoppedWorkflow, stoppedTask, stoppedSubTask)
+	}
+	if stoppedSubTask.WaitingReason != "robot_execution_failed_but_held" {
+		t.Fatalf("收敛原因必须说明失败但已保持: %+v", stoppedSubTask)
+	}
+	select {
+	case replay := <-executor.started:
+		t.Fatalf("失败但已安全保持不得自动重放: %+v", replay)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestRobotExecutionSafelyHeldTracksLastPhysicalFact(t *testing.T) {
+	st, _, _, service, _, _ := newWorkflowFixture(t)
+	now := time.Now().UTC()
+	appendEvent := func(sequence int64, kind string, payload map[string]any) {
+		t.Helper()
+		if err := st.AppendRobotExecutionEvent(store.RobotExecutionEvent{
+			ExecutionID: "rex-scan", Sequence: sequence, Type: kind,
+			Payload: payload, CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held, err := service.robotExecutionSafelyHeld("rex-scan")
+	if err != nil || held {
+		t.Fatalf("无 Action 事实时不得声称已保持: held=%v err=%v", held, err)
+	}
+	appendEvent(1, "action.started", map[string]any{"action_id": "a", "physical_started": true})
+	appendEvent(2, "action.terminal", map[string]any{"action_id": "a", "status": "failed",
+		"result": map[string]any{"safe": true, "physical_state": "hold"}})
+	if held, err = service.robotExecutionSafelyHeld("rex-scan"); err != nil || !held {
+		t.Fatalf("Ability 的保持证据必须可读: held=%v err=%v", held, err)
+	}
+	// 保持证明只对最后一个物理事实有效：新的物理动作会推翻它。
+	appendEvent(3, "action.started", map[string]any{"action_id": "b", "physical_started": true})
+	appendEvent(4, "action.terminal", map[string]any{"action_id": "b", "status": "succeeded"})
+	if held, err = service.robotExecutionSafelyHeld("rex-scan"); err != nil || held {
+		t.Fatalf("新的物理动作必须推翻此前保持证明: held=%v err=%v", held, err)
+	}
+	appendEvent(5, "action.terminal", map[string]any{"action_id": "c", "status": "stopped",
+		"result": map[string]any{"safe": true}})
+	if held, _ = service.robotExecutionSafelyHeld("rex-scan"); !held {
+		t.Fatal("其后的安全保持证明必须重新成立")
+	}
+	appendEvent(6, "action.terminal", map[string]any{"action_id": "c", "status": "stopped",
+		"result": map[string]any{"safe": false}})
+	if held, _ = service.robotExecutionSafelyHeld("rex-scan"); held {
+		t.Fatal("显式 safe=false 必须撤销保持证明")
+	}
+}
+
+func TestStopWorkflowSettlesFailedHeldExecutionWithoutConfirmation(t *testing.T) {
+	st, project, conversation, service, _, _ := newWorkflowFixture(t)
+	view, task, subTasks := prepareRunningRobotTask(t, st, project, conversation,
+		[]store.SubTaskDraft{{ID: "sub-held-stop", Kind: "robot_skill", Goal: "抓取"}})
+	now := time.Now().UTC()
+	execution := store.RobotExecution{ID: "rex-held-stop", ProjectID: project.ID,
+		WorkflowID: view.Workflow.ID, TaskID: task.ID, SubtaskID: subTasks[0].ID,
+		RobotID: task.AssignedRobotID, SkillName: "vla-manipulation", SkillVersion: "0.1.7",
+		Status: "failed", Error: map[string]any{"code": "policy_timeout"},
+		Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := st.SaveRobotExecution(execution); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AttachSubTaskExecution(subTasks[0].ID, subTasks[0].Revision,
+		execution.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	for sequence, event := range []struct {
+		kind    string
+		payload map[string]any
+	}{
+		{"action.started", map[string]any{"action_id": "policy", "physical": true, "physical_started": true}},
+		{"action.terminal", map[string]any{"action_id": "policy", "status": "failed",
+			"result": map[string]any{"safe": true, "physical_state": "hold", "hold_confirmed": true}}},
+	} {
+		if err := st.AppendRobotExecutionEvent(store.RobotExecutionEvent{
+			ExecutionID: execution.ID, Sequence: int64(sequence + 1),
+			Type: event.kind, Payload: event.payload, CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _ := st.GetWorkflow(view.Workflow.ID)
+	result, err := service.StopWorkflow(context.Background(), project.OwnerID, project.ID,
+		view.Workflow.ID, current.Revision)
+	if err != nil {
+		t.Fatalf("已安全保持的失败执行不应要求人工确认: %v", err)
+	}
+	if result.Workflow.Status != store.WorkflowStatusStopped {
+		t.Fatalf("停止必须直接收敛: %+v", result.Workflow)
+	}
+	stoppedSubTask, _ := st.GetSubTask(subTasks[0].ID)
+	if stoppedSubTask.Status != store.TaskStatusStopped ||
+		stoppedSubTask.WaitingReason != "robot_execution_failed_but_held" {
+		t.Fatalf("收敛原因必须是 failed_but_held: %+v", stoppedSubTask)
 	}
 }
 
@@ -632,6 +759,83 @@ func TestStopWorkflowWaitsForRobotStopEvidence(t *testing.T) {
 	}
 }
 
+func TestPlainStopRequiresOperatorConfirmationForUnknownPhysicalState(t *testing.T) {
+	st, project, conversation, service, _, _ := newWorkflowFixture(t)
+	robotService := robotdomain.NewService(st, nil)
+	robotService.SetExecutionObserver(service)
+	service.robotStop = robotService
+	view, task, subTasks := prepareRunningRobotTask(t, st, project, conversation,
+		[]store.SubTaskDraft{{ID: "sub-physical-unknown", Kind: "robot_skill", Goal: "抓取"}})
+	now := time.Now().UTC()
+	// 与 libero/mujoco 现场一致：Skill 已经失败，但事件证明它确实做过物理动作，
+	// 因此服务端无法证明机器人已安全停止。
+	execution := store.RobotExecution{ID: "rex-physical-unknown", ProjectID: project.ID,
+		WorkflowID: view.Workflow.ID, TaskID: task.ID, SubtaskID: subTasks[0].ID,
+		RobotID: task.AssignedRobotID, SkillName: "vla-manipulation", SkillVersion: "0.1.7",
+		Status: "failed", Error: map[string]any{"code": "OBJECTIVE_NOT_MET"},
+		Revision: 2, CreatedAt: now, UpdatedAt: now}
+	if err := st.SaveRobotExecution(execution); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AttachSubTaskExecution(
+		subTasks[0].ID, subTasks[0].Revision, execution.ID, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for sequence, event := range []struct {
+		kind    string
+		payload map[string]any
+	}{
+		{"action.started", map[string]any{"action_id": "pick", "physical": true, "physical_started": true}},
+		{"action.terminal", map[string]any{"action_id": "pick", "status": "interrupted"}},
+	} {
+		if err := st.AppendRobotExecutionEvent(store.RobotExecutionEvent{
+			ExecutionID: execution.ID, Sequence: int64(sequence + 1),
+			Type: event.kind, Payload: event.payload, CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _ := st.GetWorkflow(view.Workflow.ID)
+	_, err := service.StopWorkflow(context.Background(), project.OwnerID, project.ID,
+		view.Workflow.ID, current.Revision)
+	if !errors.Is(err, store.ErrOperatorConfirmationRequired) {
+		t.Fatalf("普通 stop 不得对物理状态未知假成功: %v", err)
+	}
+	// 第一次 stop 已经把视图推进到 paused/execution_state_unknown，重试仍然
+	// 必须是"需要人工确认"，而不是反复回退却返回成功（用户看到的老毛病）。
+	stuck, err := st.GetWorkflow(view.Workflow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stuck.Status != store.WorkflowStatusPaused || stuck.Reason != "execution_state_unknown" {
+		t.Fatalf("未知状态必须保留给人工确认: %+v", stuck)
+	}
+	if _, err := service.StopWorkflow(context.Background(), project.OwnerID, project.ID,
+		view.Workflow.ID, stuck.Revision); !errors.Is(err, store.ErrOperatorConfirmationRequired) {
+		t.Fatalf("重复普通 stop 仍须要求人工确认: %v", err)
+	}
+	// 每次普通 stop 都会推进 revision（stopping 再被安全策略退回 paused），
+	// 人工确认必须使用用户当下看到的最新现场 revision。
+	retried, err := st.GetWorkflow(view.Workflow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 唯一出口：人工安全确认，随后 Workflow 必须真正终结并释放 Robot。
+	confirmed, err := service.ConfirmWorkflowStop(context.Background(), project.OwnerID,
+		project.ID, view.Workflow.ID, retried.Revision, true, "现场已确认机器人处于安全保持")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Workflow.Status != store.WorkflowStatusStopped {
+		t.Fatalf("人工确认必须终结 Workflow: %+v", confirmed.Workflow)
+	}
+	reserved, err := st.IsRobotTaskReserved(task.AssignedRobotID, "")
+	if err != nil || reserved {
+		t.Fatalf("终结后必须释放 Robot: reserved=%v err=%v", reserved, err)
+	}
+}
+
 func TestConfirmWorkflowStopConvergesUnknownRobotExecution(t *testing.T) {
 	st, project, conversation, service, _, _ := newWorkflowFixture(t)
 	robotService := robotdomain.NewService(st, nil)
@@ -674,8 +878,8 @@ func TestConfirmWorkflowStopConvergesUnknownRobotExecution(t *testing.T) {
 	paused, err := service.StopWorkflow(
 		context.Background(), project.OwnerID, project.ID, view.Workflow.ID, current.Revision,
 	)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, store.ErrOperatorConfirmationRequired) {
+		t.Fatalf("离线停止必须明确要求人工确认: %v", err)
 	}
 	if paused.Workflow.Status != store.WorkflowStatusPaused ||
 		paused.Workflow.Reason != "execution_state_unknown" {
@@ -749,9 +953,12 @@ func TestMissingRobotExecutionCanBeConfirmedWithoutDeletingWorkflow(t *testing.T
 	paused, err := service.StopWorkflow(
 		context.Background(), project.OwnerID, project.ID, view.Workflow.ID, current.Revision,
 	)
-	if err != nil || paused.Workflow.Status != store.WorkflowStatusPaused ||
+	if !errors.Is(err, store.ErrOperatorConfirmationRequired) {
+		t.Fatalf("缺失 Execution 应明确要求人工确认: err=%v", err)
+	}
+	if paused.Workflow.Status != store.WorkflowStatusPaused ||
 		paused.Workflow.Reason != "execution_state_unknown" {
-		t.Fatalf("缺失 Execution 应进入可恢复未知态: view=%+v err=%v", paused.Workflow, err)
+		t.Fatalf("缺失 Execution 应进入可恢复未知态: view=%+v", paused.Workflow)
 	}
 	confirmed, err := service.ConfirmWorkflowStop(
 		context.Background(), project.OwnerID, project.ID, view.Workflow.ID,
@@ -1047,8 +1254,8 @@ func waitDecisionRequest(t *testing.T, seen <-chan RobotAgentDecisionRequest) Ro
 	select {
 	case request := <-seen:
 		return request
-	case <-time.After(2 * time.Second):
-		t.Fatal("Robot Agent 决策 Run 未启动")
+	case <-time.After(workflowEventWait):
+		t.Fatalf("Robot Agent 决策 Run 未在 %s 内启动", workflowEventWait)
 	}
 	return RobotAgentDecisionRequest{}
 }
@@ -1086,8 +1293,8 @@ func TestRobotDecisionEmptyReplyRetriesOnceWhileTaskKeepsRunning(t *testing.T) {
 		if body["action"] != "retry_lift" || got.payload["decision_attempts"] != 2 {
 			t.Fatalf("第二次决策应成功回复 Pilot: %#v", got.payload)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("自动重试后没有回复 Pilot")
+	case <-time.After(workflowEventWait):
+		t.Fatalf("自动重试后未在 %s 内回复 Pilot", workflowEventWait)
 	}
 	currentTask, _ := st.GetTask(task.ID)
 	currentSubTask, _ := st.GetSubTask(subTasks[0].ID)
@@ -1221,7 +1428,7 @@ func TestRetryRobotAgentDecisionOnlyStartsDecisionRun(t *testing.T) {
 		if body["action"] != "abort_subtask" {
 			t.Fatalf("重试决策没有把类型化回复交给 Pilot: %#v", got.payload)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("重试决策没有回复 Pilot")
+	case <-time.After(workflowEventWait):
+		t.Fatalf("重试决策未在 %s 内回复 Pilot", workflowEventWait)
 	}
 }

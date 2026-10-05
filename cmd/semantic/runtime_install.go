@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package main
 
 import (
@@ -33,13 +18,16 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"insightos.cn/semantic-framework/internal/install"
 	"insightos.cn/semantic-framework/internal/simulation"
 	"insightos.cn/semantic-framework/internal/store"
 	"insightos.cn/semantic-framework/pkg/config"
@@ -56,6 +44,7 @@ const (
 type runtimeInstallOptions struct {
 	configPath        string
 	packArchive       string
+	packDirectory     string
 	devSource         string
 	profileID         string
 	installationID    string
@@ -124,13 +113,14 @@ func parseRuntimeInstallOptions(name string, args []string) (runtimeInstallOptio
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.StringVar(&options.configPath, "c", "", "配置文件路径")
 	flags.StringVar(&options.packArchive, "pack", "", "离线 Runtime Pack 制品")
+	flags.StringVar(&options.packDirectory, "pack-dir", "", "已解包的离线 Runtime Pack 目录")
 	flags.StringVar(&options.devSource, "dev-source", "", "plugin-mujoco 源码目录（仅开发）")
 	flags.StringVar(&options.profileID, "profile", "", "开发源码模式的 Runtime Profile")
 	flags.StringVar(&options.installationID, "installation-id", "", "本机 installation_id")
 	flags.StringVar(&options.installationID, "id", "", "已有 installation_id（upgrade）")
 	flags.StringVar(&options.registry, "registry", "", "Runtime Pack Registry HTTPS 根地址")
 	flags.StringVar(&options.expectedSHA256, "sha256", "", "离线制品 SHA256")
-	flags.StringVar(&options.assetRoot, "asset-root", "", "MuJoCo 资产根目录")
+	flags.StringVar(&options.assetRoot, "asset-root", "", "Runtime 原生资产根目录")
 	flags.StringVar(&options.modelRoot, "model-root", "", "Robot Model Bundle 根目录")
 	flags.StringVar(&options.liberoRoot, "libero-root", "", "固定版本 LIBERO 源码/数据目录")
 	flags.StringVar(&options.liberoProRoot, "libero-pro-root", "", "固定版本 LIBERO-Pro 目录")
@@ -151,7 +141,7 @@ func parseRuntimeInstallOptions(name string, args []string) (runtimeInstallOptio
 		reference = flags.Arg(0)
 	}
 	sources := 0
-	for _, value := range []string{reference, options.packArchive, options.devSource} {
+	for _, value := range []string{reference, options.packArchive, options.packDirectory, options.devSource} {
 		if strings.TrimSpace(value) != "" {
 			sources++
 		}
@@ -220,7 +210,9 @@ func installRuntimePack(options runtimeInstallOptions, reference string) error {
 	if options.devSource != "" {
 		return installDevelopmentRuntime(paths, options)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), runtimeInstallTimeout)
+	signalContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := context.WithTimeout(signalContext, runtimeInstallTimeout)
 	defer cancel()
 	source, cleanup, err := acquireRuntimePack(ctx, paths, options, reference)
 	if err != nil {
@@ -291,18 +283,21 @@ func installRuntimePack(options runtimeInstallOptions, reference string) error {
 		AcceptedLicenses:     normalizedStrings(options.acceptedLicenses),
 		Enabled:              true, InstalledVersion: manifest.PackVersion,
 	}
+	if manifest.Settings != nil {
+		installation.SettingsPath = filepath.Join(packPath, manifest.Settings.Path)
+	}
 	if err := runInstalledRuntimeSmoke(ctx, installation, manifest, packPath); err != nil {
 		return err
 	}
-	sceneRoot := filepath.Join(paths.scenes, installationID)
-	sceneTarget := filepath.Join(sceneRoot, filepath.Base(manifest.SceneCatalog.Path))
-	installation.SceneCatalogPath = sceneTarget
+	if manifest.SceneCatalog.Path != "" {
+		installation.SceneCatalogPath = filepath.Join(paths.scenes, installationID, filepath.Base(manifest.SceneCatalog.Path))
+	}
 	if err := activateRuntimeInstallation(paths, installation, manifest, packPath,
 		options.replace); err != nil {
 		return err
 	}
 	activated = true
-	fmt.Printf("✓ Runtime %s (%s@%s) 已安装并通过真实场景 smoke\n",
+	fmt.Printf("✓ Runtime %s (%s@%s) 已安装并通过启动检查\n",
 		installationID, manifest.PackID, manifest.PackVersion)
 	fmt.Printf("  环境: %s\n  清单: %s\n", environmentPath,
 		filepath.Join(paths.runtimes, installationID+".yaml"))
@@ -325,6 +320,10 @@ func installationIDValid(value string) bool {
 
 func acquireRuntimePack(ctx context.Context, paths runtimePaths, options runtimeInstallOptions,
 	reference string) (string, func(), error) {
+	if options.packDirectory != "" {
+		root, err := filepath.Abs(options.packDirectory)
+		return root, func() {}, err
+	}
 	if options.packArchive != "" {
 		archive, err := filepath.Abs(options.packArchive)
 		if err != nil {
@@ -466,29 +465,15 @@ func extractRuntimePackArchive(ctx context.Context, parent, archive string) (str
 	if strings.HasSuffix(archive, ".tar.gz") {
 		return extractRuntimePackGzip(ctx, parent, archive)
 	}
-	listing, err := exec.CommandContext(ctx, "tar", "--zstd", "-tf", archive).Output()
-	if err != nil {
-		return "", func() {}, fmt.Errorf("读取 Runtime Pack 目录失败: %w", err)
-	}
-	for _, entry := range strings.Split(string(listing), "\n") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		if err := validateRuntimeArchiveEntry(entry); err != nil {
-			return "", func() {}, fmt.Errorf("Runtime Pack 包含不安全路径: %q", entry)
-		}
-	}
 	temp, err := os.MkdirTemp(parent, ".runtime-pack-extract-")
 	if err != nil {
 		return "", func() {}, err
 	}
 	cleanup := func() { _ = os.RemoveAll(temp) }
-	command := exec.CommandContext(ctx, "tar", "--zstd", "-xf", archive, "-C", temp,
-		"--no-same-owner", "--no-same-permissions")
-	if output, err := command.CombinedOutput(); err != nil {
+	// CLI 与 Web 使用同一解包器，同时支持既有 tar.zst 与标准 build 的 ZIP。
+	if err := install.ExtractRuntimeArchive(ctx, archive, temp); err != nil {
 		cleanup()
-		return "", func() {}, fmt.Errorf("解包 Runtime Pack 失败: %w: %s", err, output)
+		return "", func() {}, fmt.Errorf("解包 Runtime Pack 失败: %w", err)
 	}
 	if err := validateExtractedRuntimePackTree(temp); err != nil {
 		cleanup()
@@ -538,14 +523,24 @@ func validateExtractedRuntimePackTree(root string) error {
 }
 
 func materializeRuntimePack(source, target string) error {
-	if _, err := os.Stat(target); err == nil {
-		_, err = simulation.LoadRuntimePack(target)
-		return err
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	manifest, err := simulation.LoadRuntimePack(source)
 	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(target); err == nil {
+		existing, err := simulation.LoadRuntimePack(target)
+		if err != nil {
+			return err
+		}
+		// 版本相同也须对账内容摘要，不能忽略用户刚提供的新包，
+		// 再用旧环境通过 smoke 后误报“安装成功”。版本内容保持不可变。
+		wanted, _ := json.Marshal(manifest)
+		installed, _ := json.Marshal(existing)
+		if !bytes.Equal(wanted, installed) {
+			return errors.New("同版本 Runtime Pack 内容已改变；请使用新版本，或先备份并移出旧包与环境后重新安装")
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
@@ -617,6 +612,10 @@ func resolveRuntimeContent(runner string, options runtimeInstallOptions) (map[st
 		return nil
 	}
 	switch runner {
+	case "behavior-omnigibson":
+		if err := add("behavior_data", options.assetRoot); err != nil {
+			return nil, err
+		}
 	case "native-mujoco":
 		if err := add("mujoco_assets", options.assetRoot); err != nil {
 			return nil, err
@@ -748,6 +747,9 @@ func selectRuntimeEndpoint(explicit, fromPack, profileID string) string {
 
 func runInstalledRuntimeSmoke(ctx context.Context, installation simulation.RuntimeInstallation,
 	manifest simulation.RuntimePackManifest, packPath string) error {
+	if manifest.SmokeRequest.Path == "" {
+		return runRuntimeSmoke(ctx, installation, "", nil)
+	}
 	request, err := os.ReadFile(filepath.Join(packPath, filepath.FromSlash(manifest.SmokeRequest.Path)))
 	if err != nil {
 		return err
@@ -786,6 +788,9 @@ func runRuntimeSmoke(ctx context.Context, installation simulation.RuntimeInstall
 	env = append(env, simulation.RuntimeEndpointEnvironment(installation.Endpoint)...)
 	env = append(env, "SEMANTIC_SIM_PROFILE="+installation.Profile.RuntimeProfileID,
 		"PYTHONUNBUFFERED=1")
+	if installation.SettingsPath != "" {
+		env = append(env, "SEMANTIC_RUNTIME_CONFIG="+installation.SettingsPath)
+	}
 	command.Env = append(os.Environ(), env...)
 	command.Dir = installation.EnvironmentPath
 	command.Stdout, command.Stderr = logFile, logFile
@@ -813,6 +818,25 @@ func runRuntimeSmoke(ctx context.Context, installation simulation.RuntimeInstall
 			return ctx.Err()
 		case <-time.After(200 * time.Millisecond):
 		}
+	}
+	// 引擎就绪与场景可运行是两个独立结果。无场景的 Runtime 安装不会加载或重置任务。
+	if sceneKey == "" {
+		response, err := client.Get(installation.Endpoint + "/api/v1/runtime")
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return fmt.Errorf("Runtime 信息检查失败 HTTP %d", response.StatusCode)
+		}
+		var info simulation.RuntimeInfo
+		if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
+			return err
+		}
+		if info.RuntimeProfileID != installation.Profile.RuntimeProfileID {
+			return errors.New("Runtime 上报的 Profile 与安装包不一致")
+		}
+		return nil
 	}
 	response, err := client.Post(installation.Endpoint+"/api/v1/scenes/"+
 		url.PathEscape(sceneKey)+"/instances", "application/json", bytes.NewReader(requestBody))
@@ -896,6 +920,14 @@ func activateRuntimeInstallation(paths runtimePaths, installation simulation.Run
 	manifestTarget := filepath.Join(paths.runtimes, installation.InstallationID+".yaml")
 	if _, err := os.Stat(manifestTarget); err == nil && !replace {
 		return errors.New("Runtime installation 已存在；upgrade 或修复时使用 --replace")
+	}
+	if manifest.SceneCatalog.Path == "" {
+		// 独立 Runtime 的激活仅登记引擎；场景目录由场景组件持有。
+		encoded, err := yaml.Marshal(installation)
+		if err != nil {
+			return err
+		}
+		return writeRuntimeManifestAtomic(paths.runtimes, manifestTarget, encoded)
 	}
 	sceneRoot := filepath.Dir(installation.SceneCatalogPath)
 	stage, err := os.MkdirTemp(paths.scenes, ".scene-catalog-stage-")
@@ -1192,7 +1224,7 @@ func developmentSmoke(profileID string) (string, []byte) {
 		scene, layout = "Lift", "default"
 	}
 	if profileID == "libero-robosuite-1.4" {
-		scene, layout = "libero_spatial:0", "init-state-0"
+		scene, layout = "libero_spatial:0", "init-0"
 	}
 	body, _ := json.Marshal(map[string]any{"request_id": "semantic-runtime-install-smoke",
 		"layout": layout, "seed": 7, "headless": true})
@@ -1351,6 +1383,9 @@ func applyExistingRuntimeContent(
 ) {
 	if options.assetRoot == "" {
 		options.assetRoot = current.ContentRefs["mujoco_assets"]
+		if options.assetRoot == "" {
+			options.assetRoot = current.ContentRefs["behavior_data"]
+		}
 	}
 	if options.modelRoot == "" {
 		options.modelRoot = current.ContentRefs["franka_model"]
@@ -1424,19 +1459,28 @@ func runRuntimeUninstall(args []string) int {
 		return 1
 	}
 	manifestPath := filepath.Join(paths.runtimes, *id+".yaml")
-	if err := os.Remove(manifestPath); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
 	if item.SceneCatalogPath != "" && pathInside(paths.scenes, filepath.Dir(item.SceneCatalogPath)) {
-		_ = os.RemoveAll(filepath.Dir(item.SceneCatalogPath))
+		if err := os.RemoveAll(filepath.Dir(item.SceneCatalogPath)); err != nil {
+			fmt.Fprintln(os.Stderr, "场景目录清理失败:", err)
+			return 1
+		}
 	}
 	if item.EnvironmentPath != "" && pathInside(paths.envs, item.EnvironmentPath) {
-		_ = os.RemoveAll(item.EnvironmentPath)
+		if err := os.RemoveAll(item.EnvironmentPath); err != nil {
+			fmt.Fprintln(os.Stderr, "Runtime 环境清理失败:", err)
+			return 1
+		}
 	}
 	if !item.Development && item.PackPath != "" && pathInside(paths.packs, item.PackPath) &&
 		!packUsedByOtherInstallation(catalog.List(), item) {
-		_ = os.RemoveAll(item.PackPath)
+		if err := os.RemoveAll(item.PackPath); err != nil {
+			fmt.Fprintln(os.Stderr, "Runtime Pack 清理失败:", err)
+			return 1
+		}
+	}
+	if err := os.Remove(manifestPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	fmt.Printf("✓ Runtime %s 已卸载；外部资产、模型和 benchmark 数据未删除\n", *id)
 	return 0

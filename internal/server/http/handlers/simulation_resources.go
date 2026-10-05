@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package handlers
 
 import (
@@ -67,6 +52,57 @@ func (h *SimulationHandler) HandleSceneCatalog(w http.ResponseWriter, r *http.Re
 }
 
 // HandleProjectRuntimePreference 返回可移植 Profile、本机偏好和兼容候选。
+func (h *SimulationHandler) HandlePrepareScenePreviews(w http.ResponseWriter, r *http.Request) {
+	if !h.projectOwned(w, r) {
+		return
+	}
+	id := chi.URLParam(r, "scene_id")
+	visible := false
+	for _, entry := range h.simulation.SceneCatalogForProject(chi.URLParam(r, "id"), "") {
+		if entry.SceneID == id {
+			visible = true
+		}
+	}
+	if !visible {
+		writeError(w, http.StatusNotFound, "SCENE_NOT_FOUND", "场景不存在")
+		return
+	}
+	if h.writeError(w, h.simulation.StartScenePreviews(id)) {
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true})
+}
+func (h *SimulationHandler) HandleCancelScenePreviews(w http.ResponseWriter, r *http.Request) {
+	if !h.projectOwned(w, r) {
+		return
+	}
+	id := chi.URLParam(r, "scene_id")
+	for _, entry := range h.simulation.SceneCatalogForProject(chi.URLParam(r, "id"), "") {
+		if entry.SceneID == id {
+			h.simulation.CancelScenePreviews(id)
+			writeJSON(w, http.StatusOK, map[string]any{"accepted": true})
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "SCENE_NOT_FOUND", "场景不存在")
+}
+func (h *SimulationHandler) HandleScenePreviewImage(w http.ResponseWriter, r *http.Request) {
+	path, err := h.simulation.ScenePreviewFile(chi.URLParam(r, "key"), chi.URLParam(r, "file"))
+	if h.writeError(w, err) {
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	http.ServeFile(w, r, path)
+}
+func (h *SimulationHandler) HandleBundledScenePreviewImage(w http.ResponseWriter, r *http.Request) {
+	path, err := h.simulation.BundledScenePreviewFile(chi.URLParam(r, "scene_id"), r.URL.Query().Get("version"), r.URL.Query().Get("variant"))
+	if h.writeError(w, err) {
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	http.ServeFile(w, r, path)
+}
+
 func (h *SimulationHandler) HandleProjectRuntimePreference(w http.ResponseWriter, r *http.Request) {
 	if !h.projectOwned(w, r) {
 		return
@@ -235,6 +271,29 @@ func (h *SimulationHandler) HandleAddProjectScene(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusCreated, map[string]any{"project_scene": reference})
 }
 
+func (h *SimulationHandler) HandleRemoveProjectScene(w http.ResponseWriter, r *http.Request) {
+	if !h.projectWritable(w, r) {
+		return
+	}
+	projectID, referenceID := chi.URLParam(r, "id"), chi.URLParam(r, "project_scene_id")
+	reference, err := h.projects.GetProjectSceneReference(projectID, referenceID)
+	if h.writeError(w, err) {
+		return
+	}
+	entry, _, _, err := h.simulation.ValidateProjectCatalogScene(projectID, reference.CatalogSceneID, reference.SceneVersion, reference.DefaultVariantID)
+	if h.writeError(w, err) {
+		return
+	}
+	if h.writeError(w, h.simulation.CheckRuntimeInstallIdle(r.Context(), entry.CompatibleRuntimeProfile)) {
+		return
+	}
+	if h.writeError(w, h.projects.RemoveProjectSceneReference(projectID, referenceID)) {
+		return
+	}
+	h.publish(projectID, "project_scene", referenceID, 1, "simulation.project_scene.removed", reference)
+	writeJSON(w, http.StatusOK, map[string]any{"removed": referenceID})
+}
+
 // HandleCreateProjectLayoutDraft 只允许从 Project 已保存的公共场景引用派生。
 // API 不接受完整 SceneDocument，避免普通用户绕过模板和资产目录限制。
 func (h *SimulationHandler) HandleCreateProjectLayoutDraft(w http.ResponseWriter, r *http.Request) {
@@ -401,6 +460,12 @@ func (h *SimulationHandler) HandleSetRuntimeInstallationEnabled(
 	)
 	if h.writeError(w, err) {
 		return
+	}
+	if restartRequired && h.reloadResources != nil {
+		if err := h.reloadResources(r.Context()); h.writeError(w, err) {
+			return
+		}
+		restartRequired = false
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"runtime_installation":    view,

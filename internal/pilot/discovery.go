@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
@@ -93,10 +78,11 @@ func (d RobotDeployment) DesiredSkills() []store.RobotDesiredSkill {
 	return result
 }
 
-// AbilityDeployment 可选地固定一个 instance UUID。没有填写时，发现器只在
-// 对应语义角色恰好存在一个健康实例时自动绑定；多个实例时拒绝随机选择。
+// AbilityDeployment 可按能力名称选择拆分能力，并可进一步固定 instance UUID。
+// 未指定名称时沿用语义角色选择；同一选择条件下有多个健康实例时不自动绑定。
 type AbilityDeployment struct {
-	InstanceID string `yaml:"instance_id"`
+	AbilityName string `yaml:"ability_name"`
+	InstanceID  string `yaml:"instance_id"`
 }
 
 func LoadRobotDeployment(path string) (RobotDeployment, error) {
@@ -323,13 +309,14 @@ func (d *AbilityFrameworkDiscovery) Refresh(ctx context.Context) error {
 
 	profile := RobotProfile{RobotID: d.RobotID, Bindings: make(map[string]AbilityBinding)}
 	readyRoles := 0
+	ambiguousActions := make(map[string]bool)
 	roles := make([]string, 0, len(d.Desired))
 	for role := range d.Desired {
 		roles = append(roles, role)
 	}
 	sort.Strings(roles)
 	for _, role := range roles {
-		selected := selectRoleInstance(items, role, d.Desired[role].InstanceID)
+		selected := selectAbilityInstance(items, role, d.Desired[role])
 		if selected < 0 {
 			continue
 		}
@@ -343,7 +330,16 @@ func (d *AbilityFrameworkDiscovery) Refresh(ctx context.Context) error {
 			binding := AbilityBinding{Action: ActionRef{Type: action.ActionType, SchemaVersion: action.SchemaVersion},
 				AbilityName: items[selected].heartbeat.AbilityName, TaskName: action.TaskName,
 				InstanceID: items[selected].heartbeat.ID, Physical: action.Physical}
-			profile.Bindings[binding.Action.Key()] = binding
+			key := binding.Action.Key()
+			if previous, exists := profile.Bindings[key]; exists && previous.InstanceID != binding.InstanceID {
+				ambiguousActions[key] = true
+				delete(profile.Bindings, key)
+			}
+			if ambiguousActions[key] {
+				complete = false
+				continue
+			}
+			profile.Bindings[key] = binding
 		}
 		if complete {
 			readyRoles++
@@ -368,15 +364,19 @@ func (d *AbilityFrameworkDiscovery) Refresh(ctx context.Context) error {
 	return nil
 }
 
-func selectRoleInstance(items []discoveredAbility, role string, configuredID string) int {
+func selectAbilityInstance(items []discoveredAbility, role string, desired AbilityDeployment) int {
 	selected := -1
 	for index := range items {
 		item := items[index]
-		if item.role != role || !abilityStateReady(item.heartbeat.State) || item.errorText != "" {
+		matches := item.role == role
+		if desired.AbilityName != "" {
+			matches = item.heartbeat.AbilityName == desired.AbilityName
+		}
+		if !matches || !abilityStateReady(item.heartbeat.State) || item.errorText != "" {
 			continue
 		}
-		if configuredID != "" {
-			if item.heartbeat.ID == configuredID {
+		if desired.InstanceID != "" {
+			if item.heartbeat.ID == desired.InstanceID {
 				return index
 			}
 			continue

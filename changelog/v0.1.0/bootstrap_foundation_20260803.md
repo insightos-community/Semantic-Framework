@@ -40,7 +40,7 @@ CI 门禁全部落地，使空壳 semantic-server 可以真正启动并暴露
   run/doctor/clean 目标。
 - **.golangci.yml**：govet/gofmt/staticcheck/errcheck/gosimple/unused/revive
   （含导出注释规则），排除 docs/changelog。
-- **CI 配置**：lint/test/build/gitleaks 四 job，image golang:1.23。
+- **.gitlab-ci.yml**：lint/test/build/gitleaks 四 job，image golang:1.23。
 - **configs/semantic-server.yaml**：收敛至 server/log/store 三段，
   与 Config 模型一一对应。
 

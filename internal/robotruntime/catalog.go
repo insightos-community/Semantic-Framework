@@ -1,21 +1,7 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package robotruntime
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -49,6 +36,9 @@ type bundleManifest struct {
 				Profile string `yaml:"profile"`
 			} `yaml:"backendProfiles"`
 		} `yaml:"robot"`
+		Runtime struct {
+			ReadinessTimeout string `yaml:"readinessTimeout"`
+		} `yaml:"runtime"`
 	} `yaml:"spec"`
 }
 
@@ -56,6 +46,10 @@ type bundleManifest struct {
 // model/backend/profile 匹配条件；进程路径、Wheel 和 Ability 清单仍由
 // semantic-robot-instance 解释，避免 Server 再复制一套部署格式。
 func LoadCatalog(root string) (*Catalog, error) {
+	return loadCatalog(root, true)
+}
+
+func loadCatalog(root string, readIndex bool) (*Catalog, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return nil, errors.New("Robot Runtime Bundle Store 路径必填")
@@ -80,9 +74,17 @@ func LoadCatalog(root string) (*Catalog, error) {
 			strings.TrimSpace(manifest.Metadata.Version) == "" || strings.TrimSpace(manifest.Spec.Robot.Model) == "" {
 			return fmt.Errorf("%s 不是有效 RobotRuntimeBundle", path)
 		}
+		// 就绪超时由包自己声明：加载大模型的 Bundle 冷启动明显慢于仿真包。
+		// 声明非法时按未声明处理（回退默认值），不因可选字段使整包加载失败。
+		readiness := time.Duration(0)
+		if raw := strings.TrimSpace(manifest.Spec.Runtime.ReadinessTimeout); raw != "" {
+			if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+				readiness = parsed
+			}
+		}
 		for _, profile := range manifest.Spec.Robot.BackendProfiles {
 			bundles = append(bundles, Bundle{Name: manifest.Metadata.Name, Version: manifest.Metadata.Version,
-				Path: filepath.Dir(path), Match: MatchKey{RobotModel: manifest.Spec.Robot.Model,
+				Path: filepath.Dir(path), ReadinessTimeout: readiness, Match: MatchKey{RobotModel: manifest.Spec.Robot.Model,
 					Backend: profile.Backend, BackendProfile: profile.Profile}})
 		}
 		return nil
@@ -90,10 +92,81 @@ func LoadCatalog(root string) (*Catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("加载 Robot Runtime Bundle Store: %w", err)
 	}
-	if len(bundles) == 0 {
-		return nil, fmt.Errorf("%w: %s", ErrBundleNotFound, root)
+	if !readIndex {
+		return NewCatalog(bundles...)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "installed-bundles.json")); err == nil {
+		var installed map[string]string
+		if err := json.Unmarshal(content, &installed); err != nil {
+			return nil, err
+		}
+		for name, path := range installed {
+			// 安装目录固定在组件摘要目录下；旧版本仍留在原处供运行实例与回退使用。
+			next, err := loadCatalog(path, false)
+			if err != nil {
+				return nil, err
+			}
+			kept := bundles[:0]
+			for _, b := range bundles {
+				if b.Name != name {
+					kept = append(kept, b)
+				}
+			}
+			bundles = kept
+			for _, b := range next.bundles {
+				if b.Name != name {
+					return nil, fmt.Errorf("安装索引与 Bundle 名称不匹配")
+				}
+				bundles = append(bundles, b)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 	return NewCatalog(bundles...)
+}
+
+func RegisterInstalledBundle(root, path string) error {
+	next, err := loadCatalog(path, false)
+	if err != nil {
+		return err
+	}
+	if len(next.bundles) == 0 {
+		return fmt.Errorf("组件中没有 RobotRuntimeBundle")
+	}
+	if err := os.MkdirAll(root, 0750); err != nil {
+		return err
+	}
+	index := filepath.Join(root, "installed-bundles.json")
+	installed := map[string]string{}
+	if data, err := os.ReadFile(index); err == nil {
+		if err := json.Unmarshal(data, &installed); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	for _, b := range next.bundles {
+		installed[b.Name] = path
+	}
+	body, err := json.MarshalIndent(installed, "", "  ")
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(root, ".bundles-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(body)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(file.Name(), index)
 }
 
 func NewCatalog(bundles ...Bundle) (*Catalog, error) {

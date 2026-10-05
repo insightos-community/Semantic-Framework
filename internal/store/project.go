@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package store
 
 import (
@@ -278,6 +263,24 @@ func (s *Store) GetActiveProject(ownerID string) (Project, error) {
 		return Project{}, fmt.Errorf("查询活动 Project 失败: %w", err)
 	}
 	return project, nil
+}
+
+// ListDevelopmentProjects 仅供 Server 扫描项目投递目录；HTTP 仍按用户校验所有权。
+func (s *Store) ListDevelopmentProjects() ([]Project, error) {
+	rows, err := s.db.Query(`SELECT ` + projectSelectColumns + ` FROM projects WHERE archived_at IS NULL AND mode = 'development' ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	projects := []Project{}
+	for rows.Next() {
+		project, err := scanProject(rows)
+		if err != nil {
+			return nil, err
+		}
+		projects = append(projects, project)
+	}
+	return projects, rows.Err()
 }
 
 // ListProjects 返回当前用户的 Project，默认不返回已归档项目。

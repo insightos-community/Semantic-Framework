@@ -75,27 +75,3 @@ entries:
           evaluation_kind: native_success
           metrics: [reward, success]
           supports_comparison: false
-  - scene_id: libero-spatial-0
-    name: LIBERO Spatial · Task 0
-    description: 固定 suite/task，init state 作为可选布局
-    tags: [libero, benchmark, franka]
-    engine: mujoco
-    loader: libero
-    source: libero
-    compatible_runtime_profile: libero-robosuite-1.4
-    versions:
-      - version: 1.0.0
-        runtime_scene_key: libero_spatial:0
-        published: true
-        robot_models: [franka_panda]
-        variants:
-          - {variant_id: init-0, name: Init State 0, kind: init_state, parameters: {init_state_id: 0}}
-          - {variant_id: init-0-pro-environment, name: Init 0 · Environment Perturbation, kind: evaluation_config, parameters: {init_state_id: 0, perturbation: environment}}
-        capabilities: [viewer, rgb, depth, observation, evaluation]
-        authoring: {mode: none}
-        evaluation:
-          provider: libero
-          evaluation_kind: task_success
-          metrics: [success, reward]
-          supports_comparison: true
-          available_variants: [base, environment]

@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package builtin
 
 import (
@@ -37,7 +22,7 @@ type interactionAskArgs struct {
 func (t *interactionAskTool) Def() tool.Definition {
 	return tool.Definition{
 		Name: nameInteractionAsk, Namespace: "interaction",
-		Description: "向用户提出一个需要继续当前任务的结构化问题。该工具会结束当前 Run；用户回答后，系统为同一 Agent 创建新的 Run，并自动注入问题、回答和原任务上下文。不要用它代替普通说明，也不要在信息已足够时重复提问。",
+		Description: "仅在缺少会改变业务结果、授权或安全选择的用户决定时提出结构化问题，并指出具体缺失项。已批准的任务步骤、资源等待、可由当前上下文或只读查询确定的事实不需要再次确认。该工具会结束当前 Run；用户回答后系统为同一 Agent 创建新 Run 并注入原上下文。",
 		ParametersJSON: `{"type":"object","required":["prompt","presentation"],"properties":{
 			"prompt":{"type":"string","minLength":1},
 			"presentation":{"type":"string","enum":["confirm","form","single_select","multi_select","parameter","image_select","map_select","file_select"]},

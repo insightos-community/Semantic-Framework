@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package runtime
 
 import (
@@ -23,7 +8,6 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/adk/middlewares/filesystem"
@@ -31,6 +15,7 @@ import (
 
 	"insightos.cn/semantic-framework/internal/agent/kernel"
 	"insightos.cn/semantic-framework/internal/agent/profile"
+	"insightos.cn/semantic-framework/internal/contract"
 	"insightos.cn/semantic-framework/internal/robot"
 	"insightos.cn/semantic-framework/internal/skill"
 	"insightos.cn/semantic-framework/internal/store"
@@ -89,53 +74,6 @@ func (p taskDecisionToolPolicy) WrapToolCall(ctx context.Context, meta kernel.To
 	return next(ctx, argsJSON)
 }
 
-// noProgressToolPolicy 只阻止同一个 Run 在没有取得新证据时反复提交同一种
-// 无效工具调用。第一次失败仍完整返回给模型纠正；只有紧接着再次得到同一
-// 工具、同一错误码和同一错误说明时才终止 Run。它不限制正常 ReAct 轮数，
-// 工具成功、瞬态错误或错误内容发生变化都会重新开始判断。
-//
-// Purpose Runtime 是按 Agent Run 独立构建的，因此这里的状态不会跨 Task、
-// Conversation 或恢复 Run 泄漏；互斥仅用于保护模型同轮并行工具调用。
-type noProgressToolPolicy struct {
-	next kernel.ToolCallGuard
-
-	mu      sync.Mutex
-	lastKey string
-}
-
-func (p *noProgressToolPolicy) WrapToolCall(ctx context.Context, meta kernel.ToolCallMeta,
-	argsJSON string, next kernel.ToolCallEndpoint) (string, error) {
-	result, err := p.next.WrapToolCall(ctx, meta, argsJSON, next)
-	if err != nil {
-		return "", err
-	}
-	var envelope struct {
-		OK    bool `json:"ok"`
-		Error *struct {
-			Code      string `json:"code"`
-			Message   string `json:"message"`
-			Retryable bool   `json:"retryable"`
-		} `json:"error"`
-	}
-	if json.Unmarshal([]byte(result), &envelope) != nil || envelope.OK || envelope.Error == nil ||
-		envelope.Error.Retryable {
-		p.mu.Lock()
-		p.lastKey = ""
-		p.mu.Unlock()
-		return result, nil
-	}
-	key := meta.Name + "\x00" + envelope.Error.Code + "\x00" + envelope.Error.Message
-	p.mu.Lock()
-	repeated := key == p.lastKey
-	p.lastKey = key
-	p.mu.Unlock()
-	if repeated {
-		return "", fmt.Errorf("Agent 连续调用工具 %q 得到相同错误且没有新增证据: %s: %s",
-			meta.Name, envelope.Error.Code, envelope.Error.Message)
-	}
-	return result, nil
-}
-
 type purposeToolFailure struct {
 	Tool    string
 	Code    string
@@ -161,7 +99,7 @@ func missingRobotExecutionError(last *purposeToolFailure) error {
 		return fmt.Errorf("Robot Agent未成功建立Robot Execution；最后工具错误 %s/%s: %s",
 			last.Tool, last.Code, last.Message)
 	}
-	return errors.New("Robot Agent未成功建立Robot Execution；本Run没有产生可关联的robot.run执行记录")
+	return errors.New("ROBOT_TOOL_CALL_REQUIRED: Robot Agent未成功建立Robot Execution；本Run没有产生可关联的robot.run执行记录；本轮没有可归因的工具拒绝，普通文本或JSON中的调用描述不等于真实工具调用")
 }
 
 // ResolveTaskAssignment 在 Task 依赖满足后使用实时目录完成后绑定。非 Robot
@@ -599,6 +537,9 @@ func decodeAndValidateTaskPlanResult(text string, task store.Task,
 	if len(result.SubTasks) == 0 {
 		return workflow.TaskPlanResult{}, fmt.Errorf("Task Planning Run 未返回 SubTask: %w", store.ErrInvalidState)
 	}
+	if err := store.ValidateSubTaskDrafts(result.SubTasks); err != nil {
+		return workflow.TaskPlanResult{}, fmt.Errorf("SubTask 图结构不合法：goal 必须非空，kind 必须合法；显式 id 不得重复，depends_on 必须指向本次计划中的其他步骤且不能成环: %w", err)
+	}
 	if task.RequiredRole != "robot" {
 		for _, item := range result.SubTasks {
 			if item.Kind != "agent_step" {
@@ -635,8 +576,65 @@ func decodeAndValidateTaskPlanResult(text string, task store.Task,
 			return workflow.TaskPlanResult{}, fmt.Errorf("SubTask %q 的 spec.intent 必须是 JSON object: %w",
 				item.ID, store.ErrInvalidState)
 		}
+		if err := rejectReservedPlanningIntent(item.ID, intent); err != nil {
+			return workflow.TaskPlanResult{}, err
+		}
 	}
 	return result, nil
+}
+
+// reservedPlanningIntentFields 是执行期物理状态，不是稳定业务身份。
+// W-F1-01 把 carrying_object=false 写进来源导航 intent 后，16 次 Skill
+// 全部成功，Gate 仍判 protocol_failed。规划只校验信封时拦不住，必须在
+// 修正循环内按字段名拒绝，避免整轮搬运空跑。
+var reservedPlanningIntentFields = []string{"carrying_object", "held_object", "holding_object"}
+
+func rejectReservedPlanningIntent(subtaskID string, intent map[string]any) error {
+	if path := runtimeHoldingStatePath(intent, "spec.intent"); path != "" {
+		return fmt.Errorf("SubTask %q 的 %s 属于执行期持物状态，不能写入规划 intent；只保留 object_ref/carried_object_ref 等稳定引用，由执行期重新观测；目标条件写在外层 completion_criteria: %w",
+			subtaskID, path, store.ErrInvalidState)
+	}
+	return nil
+}
+
+func decodeAndValidateTaskRecovery(text string, task store.Task,
+	catalog robotTaskPlanningView) (workflow.TaskRecoveryDecision, error) {
+	// Keep the upstream entry point while using the same validator as RecoverTask;
+	// tests and production must not drift into separate recovery contracts.
+	return decodeTaskRecoveryDecision(text, task, catalog)
+}
+
+// runtimeHoldingStatePath 不校验 Skill 的 Pydantic 输入，也不改写模型输出。
+// 它只在规划边界拒绝被误当成事实的持物状态（含 false/null），避免执行后
+// 才被产品 Gate 发现。递归检查防止通过嵌套对象绕过；稳定排序提供确定的
+// 字段路径诊断，纠正次数由统一预算控制，而非按错误文本提前终止。
+func runtimeHoldingStatePath(value any, path string) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := path + "." + key
+			for _, reserved := range reservedPlanningIntentFields {
+				if key == reserved {
+					return child
+				}
+			}
+			if found := runtimeHoldingStatePath(typed[key], child); found != "" {
+				return found
+			}
+		}
+	case []any:
+		for i, item := range typed {
+			if found := runtimeHoldingStatePath(item, fmt.Sprintf("%s[%d]", path, i)); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
 }
 
 // ExecuteTask 按 Task 后绑定的 Agent 身份装配一次短 Worker Run。Developer、
@@ -674,6 +672,13 @@ func (s *Service) ExecuteTask(ctx context.Context,
 	if err != nil {
 		return workflow.TaskResult{}, err
 	}
+	if robotSubTask {
+		prompt, err = s.withSkillInputContract(runCtx, execution, prompt)
+		if err != nil {
+			return workflow.TaskResult{}, err
+		}
+		prompt += "\n" + robotToolTransportInstruction
+	}
 	userMessage := schema.UserMessage(prompt)
 	messageID, err := s.appendTaskMessage(execution, run, execution.Task.AssignedAgentID, userMessage)
 	if err != nil {
@@ -685,16 +690,11 @@ func (s *Service) ExecuteTask(ctx context.Context,
 		return workflow.TaskResult{}, err
 	}
 	text := ""
-	missingExecutionCorrected := false
-	var lastToolFailure *purposeToolFailure
 	for exchange := 0; ; exchange++ {
 		var exchangeFailure *purposeToolFailure
 		text, exchangeFailure, err = s.consumePurposeRun(runCtx, rt, run, messages)
 		if err != nil {
 			return workflow.TaskResult{}, err
-		}
-		if exchangeFailure != nil {
-			lastToolFailure = exchangeFailure
 		}
 		if _, pendingErr := s.st.GetPendingInteractionByRunID(run.ID); pendingErr == nil {
 			return workflow.TaskResult{}, workflow.ErrTaskWaitingInput
@@ -709,20 +709,21 @@ func (s *Service) ExecuteTask(ctx context.Context,
 		} else if !errors.Is(executionErr, store.ErrNotFound) {
 			return workflow.TaskResult{}, executionErr
 		}
-		if missingExecutionCorrected {
-			return workflow.TaskResult{}, missingRobotExecutionError(lastToolFailure)
-		}
 		if exchange+1 >= rt.profile.Limits.MaxTurns {
 			return workflow.TaskResult{}, fmt.Errorf(
-				"Robot Agent达到Agent Profile max_turns；%w", missingRobotExecutionError(lastToolFailure))
+				"Robot Agent达到Agent Profile max_turns；%w", missingRobotExecutionError(exchangeFailure))
 		}
-		// 模型可能在自然语言结果中伪造accepted或execution_id。这里只认Store中
-		// 由robot.run真实创建的Execution；第一次漏调工具时允许同一Run纠正，
-		// 重复同一错误则终止，避免为一个SubTask无证据地循环调用模型。
-		missingExecutionCorrected = true
+		// Only retry if robot.run has NOT created a persistent Execution. Never
+		// rerun an accepted physical action merely to repair its textual report.
+		// Diagnose this exchange only. An earlier rejected enum must not mask a
+		// later text-only reply whose parameters may already have been corrected.
+		if correctionErr := rt.contractCorrections.request(runCtx, missingRobotExecutionError(exchangeFailure)); correctionErr != nil {
+			return workflow.TaskResult{}, correctionErr
+		}
+		correction := buildRobotExecutionFeedback(exchangeFailure)
 		messages = append(messages,
 			schema.AssistantMessage(text, nil),
-			schema.UserMessage(buildRobotExecutionCorrectionPrompt()))
+			schema.UserMessage(correction))
 	}
 	assistant := schema.AssistantMessage(text, nil)
 	if _, err := s.appendTaskMessage(execution, run, execution.Task.AssignedAgentID, assistant); err != nil {
@@ -738,19 +739,16 @@ func (s *Service) ExecuteTask(ctx context.Context,
 			return workflow.TaskResult{}, nil
 		}
 	}
-	var outcome taskOutcome
-	if err := decodeStrictJSON(text, &outcome); err != nil {
-		return workflow.TaskResult{}, fmt.Errorf("Worker Task 结果必须是结构化 JSON: %w", err)
+	// This Agent may already have written files or called external tools. Reject
+	// malformed reports, but never rerun the whole tool-enabled execution merely
+	// to fix its final JSON (that could duplicate side effects).
+	checkStart := time.Now()
+	outcome, validationErr := validateTaskOutcome(text)
+	s.recordContractCheck(run, "worker_result", 1, checkStart, validationErr)
+	if validationErr != nil {
+		return workflow.TaskResult{}, validationErr
 	}
-	switch outcome.Kind {
-	case "result":
-		if strings.TrimSpace(outcome.Summary) == "" {
-			return workflow.TaskResult{}, fmt.Errorf("Worker Task 结果缺少 summary: %w", store.ErrInvalidState)
-		}
-		return workflow.TaskResult{Summary: outcome.Summary, Evidence: outcome.Evidence}, nil
-	default:
-		return workflow.TaskResult{}, fmt.Errorf("Worker Task 结果 kind 非法: %w", store.ErrInvalidState)
-	}
+	return workflow.TaskResult{Summary: outcome.Summary, Evidence: outcome.Evidence}, nil
 }
 
 // ResolveRobotAgentRequest 在原 Task Context 内启动一次短决策 Run。Skill 已经
@@ -758,6 +756,11 @@ func (s *Service) ExecuteTask(ctx context.Context,
 // 它不装配 robot.run/stop，也不能通过一个“建议”偷偷启动新的物理动作。
 func (s *Service) ResolveRobotAgentRequest(ctx context.Context,
 	request workflow.RobotAgentDecisionRequest) (map[string]any, error) {
+	var decision map[string]any
+	reviewer, err := checkpointReviewer(request.Event, func(value map[string]any) { decision = value })
+	if err != nil {
+		return nil, err
+	}
 	input, err := json.Marshal(map[string]any{
 		"workflow_goal":      request.Workflow.Goal,
 		"task_goal":          request.Task.Goal,
@@ -785,7 +788,6 @@ func (s *Service) ResolveRobotAgentRequest(ctx context.Context,
 	if skillErr != nil {
 		return nil, skillErr
 	}
-	var decision map[string]any
 	decisionPurpose := runtimePurposeRobotDecision
 	if navigationDecision {
 		decisionPurpose = runtimePurposeRobotNavigationDecision
@@ -793,15 +795,7 @@ func (s *Service) ResolveRobotAgentRequest(ctx context.Context,
 	_, err = s.runTaskAgent(ctx, request.UserID, request.Project, request.Conversation,
 		request.Workflow, "", &request.Task, request.Task.AssignedAgentID, prompt, request.Answer,
 		planningSkills, store.RunKindTaskExecution, decisionPurpose,
-		func(text string) error {
-			var value map[string]any
-			if decodeErr := decodeStrictJSON(text, &value); decodeErr != nil {
-				return fmt.Errorf("Robot Agent 回复不是类型化 JSON: %v: %w", decodeErr,
-					workflow.ErrRobotAgentDecisionInvalid)
-			}
-			decision = value
-			return nil
-		})
+		reviewer)
 	if err != nil {
 		return nil, err
 	}
@@ -814,6 +808,40 @@ func (s *Service) ResolveRobotAgentRequest(ctx context.Context,
 		}
 	}
 	return decision, nil
+}
+
+func (s *Service) withSkillInputContract(ctx context.Context, execution workflow.TaskExecution, prompt string) (string, error) {
+	start := time.Now()
+	defer func() {
+		if s.logger != nil {
+			s.logger.Info("agent.contract.prepare", "task_id", execution.Task.ID,
+				"purpose", "skill_input", "duration_ns", time.Since(start).Nanoseconds())
+		}
+	}()
+	if s.skillContracts == nil {
+		return "", fmt.Errorf("Robot Skill contract provider is unavailable")
+	}
+	var spec struct {
+		SkillName    string `json:"skill_name"`
+		SkillVersion string `json:"skill_version"`
+	}
+	if err := json.Unmarshal(execution.SubTasks[0].Spec, &spec); err != nil {
+		return "", err
+	}
+	declared, err := s.skillContracts.DescribeSkillInput(ctx, execution.Task.AssignedRobotID, spec.SkillName, spec.SkillVersion)
+	if err != nil {
+		return "", err
+	}
+	if _, err := contract.CompileObject(declared); err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(map[string]any{"skill_name": spec.SkillName,
+		"skill_version": spec.SkillVersion, "input_schema": declared})
+	if err != nil {
+		return "", err
+	}
+	return prompt + "\n当前已安装 Skill 的真实输入契约（只约束 robot.run 的 input，不是整个工具参数）：\n" + string(raw) +
+		"\n按 required、枚举与嵌套定义生成完整 input；可选字段缺少可靠事实时省略，不得编造。契约不是授权；仍须遵守当前 SubTask、批准范围与实时状态。输出不合格时依据结构化错误修正本次调用，不重放已创建的 Execution。", nil
 }
 
 // RecoverTask 在 Robot Execution 已明确 failed 后启动一次只读决策 Run。
@@ -850,13 +878,27 @@ func (s *Service) RecoverTask(ctx context.Context,
 	if skillErr != nil {
 		return workflow.TaskRecoveryDecision{}, skillErr
 	}
-	text, err := s.runTaskAgent(ctx, request.UserID, request.Project,
+	var decision workflow.TaskRecoveryDecision
+	_, err = s.runTaskAgent(ctx, request.UserID, request.Project,
 		request.Conversation, request.Workflow, "", &request.Task,
 		request.Task.AssignedAgentID, prompt, request.Answer, planningSkills,
-		store.RunKindTaskExecution, runtimePurposeTaskRecovery)
+		store.RunKindTaskExecution, runtimePurposeTaskRecovery, func(text string) error {
+			value, validationErr := decodeTaskRecoveryDecision(text, request.Task, catalog)
+			if validationErr == nil {
+				decision = value
+			}
+			return validationErr
+		})
 	if err != nil {
 		return workflow.TaskRecoveryDecision{}, err
 	}
+	if decision.Decision == "" {
+		return workflow.TaskRecoveryDecision{}, fmt.Errorf("Task recovery 未返回决策: %w", store.ErrInvalidState)
+	}
+	return decision, nil
+}
+
+func decodeTaskRecoveryDecision(text string, task store.Task, catalog robotTaskPlanningView) (workflow.TaskRecoveryDecision, error) {
 	var output struct {
 		Decision     string               `json:"decision"`
 		Summary      string               `json:"summary"`
@@ -865,10 +907,26 @@ func (s *Service) RecoverTask(ctx context.Context,
 	if err := decodeStrictJSON(text, &output); err != nil {
 		return workflow.TaskRecoveryDecision{}, fmt.Errorf("Task recovery 返回非法结构: %w", err)
 	}
+	if strings.TrimSpace(output.Summary) == "" {
+		return workflow.TaskRecoveryDecision{}, fmt.Errorf("Task recovery 缺少 summary: %w", store.ErrInvalidState)
+	}
 	switch output.Decision {
 	case "revise_pending":
 		if len(output.Replacements) == 0 {
 			return workflow.TaskRecoveryDecision{}, fmt.Errorf("Task recovery 缺少替代步骤: %w", store.ErrInvalidState)
+		}
+		// 恢复仍是在生成未执行步骤，必须与首次规划使用同一机器契约；
+		// 失败 Execution 的持物快照不能经 replacements 重新变成规划事实。
+		encoded, marshalErr := json.Marshal(workflow.TaskPlanResult{Summary: output.Summary, SubTasks: output.Replacements})
+		if marshalErr != nil {
+			return workflow.TaskRecoveryDecision{}, marshalErr
+		}
+		// Recovery follows a failed Robot Skill, so replacements must satisfy the
+		// Robot planning contract even if a caller omitted the role in its view.
+		planTask := task
+		planTask.RequiredRole = "robot"
+		if _, validationErr := decodeAndValidateTaskPlanResult(string(encoded), planTask, catalog); validationErr != nil {
+			return workflow.TaskRecoveryDecision{}, fmt.Errorf("Task recovery 替代步骤违反规划契约: %w", validationErr)
 		}
 	case "fail_task":
 		if len(output.Replacements) != 0 {
@@ -966,10 +1024,8 @@ func (s *Service) runTaskAgent(ctx context.Context, userID string, project store
 		return "", err
 	}
 	text, runErr := "", error(nil)
-	seenProblems := make(map[string]struct{})
-	// 结构纠正仍属于这一个可追踪的 Task Planning Run。循环上限直接复用
-	// Agent Profile 的 max_turns；相同错误没有带来新证据时立即停止，避免
-	// 为了追求固定“一次调用”或固定“一次纠正”而牺牲可恢复性或浪费Token。
+	// Final-output validation and tool feedback share a bounded correction
+	// budget. Identical error descriptions do not prove identical outputs.
 	for exchange := 0; ; exchange++ {
 		text, _, runErr = s.consumePurposeRun(runCtx, rt, run, messages)
 		if taskValue != nil {
@@ -988,23 +1044,28 @@ func (s *Service) runTaskAgent(ctx context.Context, userID string, project store
 		if runErr != nil || len(reviewers) == 0 || reviewers[0] == nil {
 			break
 		}
+		checkStart := time.Now()
 		problem := reviewers[0](text)
+		purpose := runtimePurpose
+		if purpose == "" {
+			purpose = runKind
+		}
+		s.recordContractCheck(run, purpose, exchange+1, checkStart, problem)
 		if problem == nil {
 			break
 		}
-		problemText := problem.Error()
-		if _, repeated := seenProblems[problemText]; repeated {
-			runErr = fmt.Errorf("Task Planning 重复产生相同非法结构: %w", problem)
-			break
-		}
-		seenProblems[problemText] = struct{}{}
 		if exchange+1 >= rt.profile.Limits.MaxTurns {
 			runErr = fmt.Errorf("Task Planning 达到 Agent Profile max_turns 后仍未通过契约校验: %w", problem)
+			break
+		}
+		if runErr = rt.contractCorrections.request(runCtx, problem); runErr != nil {
 			break
 		}
 		correction := buildTaskPlanningCorrectionPrompt(problem)
 		if isRobotDecisionPurpose(runtimePurpose) {
 			correction = buildRobotAgentDecisionCorrectionPrompt(problem)
+		} else if runtimePurpose == runtimePurposeTaskRecovery {
+			correction = buildTaskRecoveryCorrectionPrompt(problem)
 		}
 		messages = append(messages,
 			schema.AssistantMessage(text, nil),
@@ -1101,7 +1162,7 @@ func (s *Service) buildPurposeRuntimeWithSkills(ctx context.Context, sessionID, 
 		derived.Tools.ToolSearch = false
 		derived.Interrupt.ApprovalRequired = nil
 		if planning {
-			derived.Instruction += "\n\n当前是 Task Planning Run：依据 Task input、实际 Robot/Skill 目录进行拆解；可以按需加载 Project Agent Skill或当前 Robot Skill正文，也可在确实需要环境事实时调用 map.query。不得读取文件或Artifact，不得执行命令、运行Robot Skill、委派Agent、部署或操作Robot。任何无法由工具解决、会改变业务结果、授权或安全选择的问题都可以调用interaction.ask；设备忙碌或离线只属于资源等待，不应询问用户。最终回复必须是调用方指定的单个JSON对象。"
+			derived.Instruction += "\n\n当前是 Task Planning Run：依据 Task input、实际 Robot/Skill 目录进行拆解；可以按需加载 Project Agent Skill或当前 Robot Skill正文，也可在确实需要环境事实时调用 map.query。不得读取文件或Artifact，不得执行命令、运行Robot Skill、委派Agent、部署或操作Robot。仅当缺少会改变业务结果、授权或安全选择且无法从当前上下文或只读工具获得的用户决定时调用 interaction.ask，并说明具体缺失项；已批准的步骤无需再次询问是否开始，设备忙碌或离线只属于资源等待。最终回复必须是调用方指定的单个JSON对象。"
 		} else if planConversation {
 			derived.Instruction += `
 当前对话由用户显式选择了 Plan Mode。你仍在原 Conversation 中与用户交流：先读取必要上下文、说明理解，只提出真正影响方案的澄清问题；需要结构化回答时调用 interaction.ask，回答会在新的 Leader Run 中自动带回，然后继续收敛。不得修改文件、执行命令、调用 Skill、委派 Agent、部署或操作 Robot。不要在需求仍不明确时调用 plan.suggest；当目标、约束和完成条件已经足够时，调用 plan.suggest，并在 tasks 中提交完整的 Leader Task TODO 与依赖。Task 只描述业务目标、角色、能力、资源范围和完成标准，不要生成 SubTask、Stage、Action 或 Ability。plan.suggest 成功即表示当前 revision 已 ready，可由计划卡完整展示；只需简短请用户在计划卡审阅、批准或继续对话修改，不要在回复中重复整份计划。批准由用户界面携带精确 revision 直接提交给 Workflow Service，Leader 不执行批准状态迁移，也不能声称仅凭一条自然语言消息已经开始 Workflow。用户要求调整时，应重新调用 plan.suggest 生成新 revision。constraints 与 completion_criteria 必须传数组或对象；map_binding 只有在用户要求核对地图且已有精确 map_id、generation 与 selections 时才传，没有有效选择时省略。绝不能用 true/false 充当结构化字段。若工具返回 BAD_ARGUMENTS，应按错误纠正参数，最多再调用一次。不要使用 artifact.list 推断 Workflow 或 Robot Execution 状态，领域进度由 Workflow/Robot 事件和运行视图展示。不要把 Markdown 文本冒充可执行 Workflow。`
@@ -1113,7 +1174,7 @@ Plan Mode 的 Leader 本来就不会注入 robot.get、robot.run、robot.stop；
 		} else if taskRecovery {
 			derived.Instruction += "\n\n当前是已明确failed的Robot Execution恢复Run。可以读取当前Robot、地图和相关证据，确需业务或安全选择时可以询问用户；不得直接运行或停止Robot，不得修改已完成步骤或重放原Execution。最终只返回调用方要求的恢复JSON。"
 		} else if robotExecution {
-			derived.Instruction += "\n\n当前是Robot Task中一个SubTask的执行Run。只能读取当前Robot或必要地图参考、询问用户、运行或安全停止当前Robot Skill；不得读写工作区、委派SubAgent或操作其他Task。"
+			derived.Instruction += "\n\n当前是Robot Task中一个SubTask的执行Run。只能读取当前Robot或必要地图参考、询问用户、运行或安全停止当前Robot Skill；不得读写工作区、委派SubAgent或操作其他Task。已获批准的步骤无需再次询问是否开始；仅当缺少会改变结果、授权或安全选择的用户决定时调用 interaction.ask，并说明具体缺失项。"
 		} else {
 			derived.Instruction += "\n\n当前 Run 只负责总结一个已经进入终态的 Workflow。必须以注入的结构化 Task/SubTask 结果和证据为准；不得调用工具、重新规划、声称未出现的结果，或启动任何新的执行。"
 		}
@@ -1205,8 +1266,9 @@ Plan Mode 的 Leader 本来就不会注入 robot.get、robot.run、robot.stop；
 	if (planning || robotDecision || taskRecovery) && skillOverride != nil {
 		effectiveSkills = skillOverride
 	}
+	corrections := newContractCorrectionBudget(derived.Limits.MaxTurns)
 	if policy != nil {
-		policy = &noProgressToolPolicy{next: policy}
+		policy = &contractToolPolicy{next: policy, budget: corrections}
 	}
 	runner, err := kernel.BuildAgent(ctx, kernel.AgentConfig{
 		Name: derived.Name, Role: string(derived.Mode), Description: derived.Description,
@@ -1228,7 +1290,7 @@ Plan Mode 的 Leader 本来就不会注入 robot.get、robot.run、robot.stop；
 	if err != nil {
 		return nil, err
 	}
-	return &sessionRuntime{runner: runner, profile: &derived,
+	return &sessionRuntime{runner: runner, profile: &derived, contractCorrections: corrections,
 		supportsVision: hasCapability(entry.Capabilities, "image"), modelResolution: ModelResolution{
 			RequestedEndpoint: derived.Model, ResolvedEndpoint: snapshot.EndpointID,
 			ResolvedModel: entry.Model, Provider: entry.Service, Source: snapshot.Source,
@@ -1326,6 +1388,14 @@ func (s *Service) registerPurposeRun(parent context.Context, run store.RunSessio
 
 func (s *Service) consumePurposeRun(ctx context.Context, rt *sessionRuntime, run store.RunSession,
 	messages []*schema.Message) (string, *purposeToolFailure, error) {
+	start := time.Now()
+	defer func() {
+		if s.logger != nil {
+			s.logger.Info("agent.contract.exchange", "run_id", run.ID, "task_id", run.TaskID,
+				"kind", run.Kind, "duration_ns", time.Since(start).Nanoseconds(),
+				"includes_tools", true)
+		}
+	}()
 	stream, err := rt.runner.RunMessages(ctx, messages,
 		kernel.RunOptions{CheckpointID: run.ID, TraceID: run.TraceID})
 	if err != nil {
@@ -1569,17 +1639,18 @@ func (s *Service) taskExecutionPrompt(execution workflow.TaskExecution) (string,
 }
 
 func decodeStrictJSON(text string, target any) error {
-	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(text)))
+	text = strings.TrimSpace(text)
+	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		return err
+		return describeJSONError(text, err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return errors.New("JSON 后存在额外内容")
 		}
-		return err
+		return describeJSONError(text, err)
 	}
 	return nil
 }

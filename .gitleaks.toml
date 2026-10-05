@@ -18,3 +18,12 @@ regexes = [
   '''sk-testkey123456''',
   '''sk-test''',
 ]
+
+[[rules.allowlists]]
+# strings.Trim(key, "0123456789abcdef") 是校验 64 位内容摘要的十六进制字符集，
+# 只因邻近标识符名为 key 而被 generic-api-key 误判。
+description = "十六进制字符集常量，用于校验内容摘要 ID，不是密钥"
+regexTarget = "secret"
+regexes = [
+  '''^0123456789abcdef$''',
+]

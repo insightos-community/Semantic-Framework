@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package workflow
 
 import (
@@ -284,10 +269,23 @@ func (s *Service) StopWorkflow(ctx context.Context, userID, projectID, workflowI
 	}
 	_ = s.convergeStoppedWorkflow(workflowID)
 	result, err := s.st.GetWorkflowView(workflowID)
-	if err == nil {
+	if err != nil {
+		return result, err
+	}
+	// 物理执行状态未知时安全策略会把 stopping 退回 paused/execution_state_unknown，
+	// 普通 stop 无法证明安全停止。此时必须把"需要人工确认"作为明确结果返回，否则
+	// 前端拿到 200 会显示停止成功，而 Robot 锁和场景其实都还在。
+	if result.Workflow.Status == store.WorkflowStatusPaused &&
+		result.Workflow.Reason == "execution_state_unknown" {
+		s.publishView(result, "workflow.stop_requires_confirmation")
+		return result, store.ErrOperatorConfirmationRequired
+	}
+	// 已收敛到 stopped 时 convergeStoppedWorkflow 已经发布终态事件；这里只描述
+	// 仍在停止过程中的视图，避免活动流把已暂停/已停止的视图显示成"停止中"。
+	if result.Workflow.Status != store.WorkflowStatusStopped {
 		s.publishView(result, "workflow.stopping")
 	}
-	return result, err
+	return result, nil
 }
 
 // ConfirmWorkflowStop 是 execution_state_unknown 的唯一人工终结入口。它先用

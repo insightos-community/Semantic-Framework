@@ -1,24 +1,10 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -166,9 +152,77 @@ func discoveryServer(t *testing.T, heartbeats []abilityHeartbeat, tasks map[stri
 		const prefix = "/api/manifest/"
 		if len(r.URL.Path) > len(prefix) && r.URL.Path[:len(prefix)] == prefix {
 			// 同一 Ability 版本的多个实例共享一份真实 Manifest。
-			_ = json.NewEncoder(w).Encode(map[string]any{"tasks": tasks[heartbeats[0].ID]})
-			return
+			for _, heartbeat := range heartbeats {
+				if r.URL.Path == prefix+heartbeat.AbilityName+"/"+heartbeat.Version {
+					_ = json.NewEncoder(w).Encode(map[string]any{"tasks": tasks[heartbeat.ID]})
+					return
+				}
+			}
 		}
 		http.NotFound(w, r)
 	}))
+}
+
+func TestNamedAbilitiesRouteSplitMotionActions(t *testing.T) {
+	for _, conflicting := range []bool{false, true} {
+		t.Run(fmt.Sprint(conflicting), func(t *testing.T) {
+			heartbeats := []abilityHeartbeat{
+				{ID: "arm-1", AbilityName: "Arm.V2", Version: "1", State: "Standby"},
+				{ID: "torso-1", AbilityName: "Torso.V2", Version: "1", State: "Standby"},
+			}
+			tasks := func(action string) []map[string]any {
+				return []map[string]any{
+					{"taskName": "Move", "taskType": 0, "actionType": action, "abilityRole": "manipulator_motion", "schemaVersion": 2, "physical": true},
+					{"taskName": "GetExecution", "taskType": 1}, {"taskName": "StopExecution", "taskType": 2},
+				}
+			}
+			torsoAction := "motion.set_torso_state"
+			if conflicting {
+				torsoAction = "motion.move_arm_joint"
+			}
+			server := discoveryServer(t, heartbeats, map[string][]map[string]any{"arm-1": tasks("motion.move_arm_joint"), "torso-1": tasks(torsoAction)})
+			defer server.Close()
+			deployment := testDeployment(server.URL)
+			deployment.Abilities = map[string]AbilityDeployment{"arm": {AbilityName: "Arm.V2"}, "torso": {AbilityName: "Torso.V2"}}
+			catalog := NewCatalog()
+			discovery := NewAbilityFrameworkDiscovery(deployment, NewAbilityFrameworkClient(server.URL, nil), catalog, nil)
+			discovery.HTTPClient = server.Client()
+			if err := discovery.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			binding, err := catalog.Resolve("r1pro-test", ActionRef{Type: "motion.move_arm_joint", SchemaVersion: 2})
+			if conflicting {
+				if !errors.Is(err, ErrActionNotBound) || discovery.Snapshot().Status == "ready" {
+					t.Fatalf("conflicting action was routed: %#v %v", binding, err)
+				}
+				return
+			}
+			if err != nil || binding.InstanceID != "arm-1" {
+				t.Fatalf("arm routing failed: %#v %v", binding, err)
+			}
+			binding, err = catalog.Resolve("r1pro-test", ActionRef{Type: torsoAction, SchemaVersion: 2})
+			if err != nil || binding.InstanceID != "torso-1" || discovery.Snapshot().Status != "ready" {
+				t.Fatalf("torso routing failed: %#v %v", binding, err)
+			}
+		})
+	}
+}
+
+func TestNamedAbilityRequiresUniqueHealthyInstance(t *testing.T) {
+	items := []discoveredAbility{
+		{role: "manipulator_motion", heartbeat: abilityHeartbeat{ID: "first", AbilityName: "Arm.V2", State: "Standby"}},
+		{role: "manipulator_motion", heartbeat: abilityHeartbeat{ID: "second", AbilityName: "Arm.V2", State: "Standby"}},
+	}
+	desired := AbilityDeployment{AbilityName: "Arm.V2"}
+	if got := selectAbilityInstance(items, "arm", desired); got != -1 {
+		t.Fatal("selected ambiguous instance", got)
+	}
+	desired.InstanceID = "second"
+	if got := selectAbilityInstance(items, "arm", desired); got != 1 {
+		t.Fatal("explicit instance not selected", got)
+	}
+	desired.AbilityName = "Missing.V2"
+	if got := selectAbilityInstance(items, "arm", desired); got != -1 {
+		t.Fatal("name filter ignored", got)
+	}
 }

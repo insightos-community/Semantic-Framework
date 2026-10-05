@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 // Package robot 实现 Semantic Server 对多个 Pilot、Robot Skill 包和 Robot
 // Execution 的统一管理。Pilot 本地运行细节留在 internal/pilot。
 package robot
@@ -130,6 +115,8 @@ type AvailabilityObserver interface {
 
 // Service 是 Server Robot 主链的应用服务。所有执行事实先持久化，再下发命令。
 type Service struct {
+	// 发布锁保护“检查版本 → 写包 → 登记”的完整过程，已发布版本保持不可变。
+	publishMu    sync.Mutex
 	st           *store.Store
 	events       EventSink
 	now          func() time.Time
@@ -1581,6 +1568,8 @@ func (s *Service) StopAbilityDebug(robotID, debugID string) (map[string]any, err
 }
 
 func (s *Service) PublishSkillArchive(reader io.Reader) (store.RobotSkillPackage, error) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
 	root, err := os.MkdirTemp("", "robot-skill-publish-")
 	if err != nil {
 		return store.RobotSkillPackage{}, err
@@ -1632,6 +1621,20 @@ func (s *Service) PublishSkillArchive(reader io.Reader) (store.RobotSkillPackage
 	}
 	content, err := os.ReadFile(archive)
 	if err != nil {
+		return store.RobotSkillPackage{}, err
+	}
+	// 同一版本可以重复导入同一归档；修改后的源码需产生新版本，避免安装记录
+	// 仍指向旧版本号而实际包内容已经变化。此检查先于任何已发布文件写入。
+	if old, err := s.st.GetRobotSkillPackage(parsed.Name, version); err == nil {
+		previous, err := os.ReadFile(old.PackagePath)
+		if err != nil {
+			return store.RobotSkillPackage{}, err
+		}
+		if !sameSkillArchive(previous, content) {
+			return store.RobotSkillPackage{}, fmt.Errorf("Robot Skill %s@%s 已发布不同内容，请更新版本后导入", parsed.Name, version)
+		}
+		return old, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.RobotSkillPackage{}, err
 	}
 	if err := os.WriteFile(target, content, 0o640); err != nil {

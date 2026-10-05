@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package builtin
 
 import (
@@ -148,6 +133,34 @@ Use target.object_ref from the current request.
 		t.Fatal(err)
 	}
 	service := robotdomain.NewService(st, nil)
+	contractPilot, err := st.GetRobotPilot("contract-pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands, disconnect, err := service.Connect(contractPilot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(disconnect)
+	contractCtx, cancelContracts := context.WithCancel(context.Background())
+	t.Cleanup(cancelContracts)
+	go func() {
+		for {
+			select {
+			case command, ok := <-commands:
+				if !ok {
+					return
+				}
+				if command.Type != "skill.describe_input" {
+					continue
+				}
+				_ = service.HandleCommandAckResult("contract-pilot", command.CommandID, true, "",
+					map[string]any{"name": "exact-skill", "version": "1.0.0", "input_schema": map[string]any{"type": "object", "required": []any{"target"}}})
+			case <-contractCtx.Done():
+				return
+			}
+		}
+	}()
 	if err := st.SaveRuntimeInstance(context.Background(), robotruntime.RuntimeInstance{
 		InstanceID: "contract-runtime", ProjectID: project.ID, RobotID: "contract-robot",
 		SceneInstanceID: "contract-scene", Status: robotruntime.StateReady,
@@ -221,8 +234,8 @@ Use target.object_ref from the current request.
 	if _, exists := contract["package_path"]; exists {
 		t.Fatal("模型契约不应包含 Server 发布包文件路径")
 	}
-	if _, exists := contract["input_schema"]; exists {
-		t.Fatal("不得把模型标识或示例伪装成 JSON Schema")
+	if inputSchema, ok := contract["input_schema"].(map[string]any); !ok || inputSchema["type"] != "object" {
+		t.Fatal("必须返回已安装 Worker 的真实 Schema，不得由模型标识或示例拼接")
 	}
 	selected := read(`{"skill_name":"exact-skill","include_details":true}`)
 	if selected["robot_details"] != nil || contract["extensions"] != nil || contract["resources"] != nil {

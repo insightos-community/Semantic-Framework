@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package runtime
 
 import (
@@ -39,6 +24,7 @@ import (
 	"insightos.cn/semantic-framework/internal/server/ws"
 	"insightos.cn/semantic-framework/internal/skill"
 	"insightos.cn/semantic-framework/internal/store"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/config"
 	"insightos.cn/semantic-framework/pkg/llm"
 	"insightos.cn/semantic-framework/pkg/log"
@@ -113,16 +99,9 @@ func newTestFixture(t *testing.T) *testFixture {
 		t.Fatalf("构建 LLM 注册表失败: %v", err)
 	}
 
-	st, err := store.Open(config.StoreConfig{
-		Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	}, logger)
-	if err != nil {
-		t.Fatalf("Open 失败: %v", err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate 失败: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	// 已迁移库取共享模板的私有副本：Migrate 在 -race + coverage 下单次约 1.1 秒，
+	// 本包有 60 多个测试要建库，逐个重建会让固定成本高过被测逻辑。
+	st := storetest.OpenMigrated(t, logger)
 
 	bus := event.NewBus(logger)
 	return &testFixture{
@@ -680,8 +659,8 @@ func TestUpdateAgentProfileOnlyAffectsNewSessions(t *testing.T) {
 	}()
 	select {
 	case <-m.started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("首轮没有进入模型")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("首轮没有在 %s 内进入模型", runtimeEventWait)
 	}
 	sessions, _ := fx.st.ListChatSessionsByUser("usr-1")
 	sessionID := sessions[0].ID
@@ -746,8 +725,8 @@ func TestSetSessionAgentModelRejectsBusyRun(t *testing.T) {
 	}()
 	select {
 	case <-m.started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("首轮没有进入模型")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("首轮没有在 %s 内进入模型", runtimeEventWait)
 	}
 	sessions, _ := fx.st.ListChatSessionsByUser("usr-1")
 	sessionID := sessions[0].ID
@@ -1023,8 +1002,8 @@ func TestCancelThenContinue(t *testing.T) {
 	}()
 	select {
 	case <-m.started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("首轮没有进入模型")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("首轮没有在 %s 内进入模型", runtimeEventWait)
 	}
 	sessions, err := fx.st.ListChatSessionsByUser("usr-1")
 	if err != nil || len(sessions) != 1 {
@@ -1038,8 +1017,8 @@ func TestCancelThenContinue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("用户取消应作为正常终态返回: %v", err)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("首轮取消后没有收尾")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("首轮取消后未在 %s 内收尾", runtimeEventWait)
 	}
 
 	if _, err := svc.HandleMessage(context.Background(), "usr-1", sessions[0].ID, "继续执行"); err != nil {

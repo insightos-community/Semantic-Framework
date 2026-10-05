@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package runtime
 
 import (
@@ -118,8 +103,8 @@ func TestCancelRunByIDTransitionsAndPublishes(t *testing.T) {
 	}()
 	select {
 	case <-model.started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Run 未进入模型")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("Run 未在 %s 内进入模型", runtimeEventWait)
 	}
 	sessions, err := fx.st.ListChatSessionsByUser("usr-1")
 	if err != nil || len(sessions) != 1 {
@@ -150,8 +135,8 @@ func TestCancelRunByIDTransitionsAndPublishes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("用户取消应正常收尾: %v", err)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("取消后 Run 未收尾")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("取消后 Run 未在 %s 内收尾", runtimeEventWait)
 	}
 	cancelled, err := fx.st.GetRunSession(run.ID)
 	if err != nil || cancelled.Status != store.RunStatusCancelled ||

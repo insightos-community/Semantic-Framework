@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package handlers
 
 import (
@@ -35,6 +20,7 @@ import (
 	"insightos.cn/semantic-framework/internal/event"
 	"insightos.cn/semantic-framework/internal/server/auth"
 	"insightos.cn/semantic-framework/internal/store"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/config"
 	"insightos.cn/semantic-framework/pkg/llm"
 	"insightos.cn/semantic-framework/pkg/log"
@@ -44,16 +30,7 @@ import (
 func newAgentsTestRouter(t *testing.T) (http.Handler, *runtime.Service, *store.Store) {
 	t.Helper()
 	logger := log.New(log.Options{Level: log.LevelError, Writer: io.Discard})
-	st, err := store.Open(config.StoreConfig{
-		Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	}, logger)
-	if err != nil {
-		t.Fatalf("Open 失败: %v", err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate 失败: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	st := storetest.OpenMigrated(t, logger)
 
 	// Leader 与请求式 Query profile 夹具。
 	root := t.TempDir()

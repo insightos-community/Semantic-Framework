@@ -29,10 +29,20 @@ test:
     # 时序敏感的集成/交互测试连续超时（Pipeline #5014/#5020）。
     # -p 2 × GOMAXPROCS=8 = 16 工作线程，低于核数消除超订，同时保留
     # 并行度（全量时长与默认并行相当）。
+    # 注意：限流只解决调度饥饿。#5377/#5389/#5403 的连续超时是另一种
+    # 原因——测试量与固定成本增长，不是线程争抢；处理方式见下方 script
+    # 注释，不要把这两类超时混为一谈。
     GOMAXPROCS: "8"
   script:
     - export PATH="$GOBIN:$PATH"
     - mkdir -p .output
+    # 数据库测试不要各自 Open + Migrate：-race 与 coverage 同时开启时 Migrate
+    # 单次实测约 1.1 秒，几十个用例逐个从空库建库会把本任务推过 20 分钟上限
+    # （Pipeline #5377/#5389/#5403 连续超时，internal/agent/runtime 一度 524 秒）。
+    # 测试统一经 internal/store/storetest 复用一份已迁移模板的私有副本（自带装配
+    # 入口的测试用 SeedMigratedAt），测试间隔离性不变。改后本机同参数全量
+    # （-p 2 -race -coverprofile）1 分 38 秒，internal/agent/runtime 由 97.5 秒降到
+    # 8.2 秒，总覆盖率不变（59.0%）。新增数据库测试请使用该辅助包，不要退回逐用例建库。
     - go test -p 2 ./... -race -count=1 -coverprofile=.output/coverage.out
   artifacts:
     when: always

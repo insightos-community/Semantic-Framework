@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package kernel
 
 import (
@@ -216,6 +201,16 @@ type toolPolicyMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
 	guard   ToolCallGuard
 	nameMap map[string]string
+}
+
+func (m *toolPolicyMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState,
+	_ *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	if guard, ok := m.guard.(ModelRoundGuard); ok {
+		if err := guard.BeforeModelRound(ctx); err != nil {
+			return ctx, state, err
+		}
+	}
+	return ctx, state, nil
 }
 
 func (m *toolPolicyMiddleware) WrapInvokableToolCall(_ context.Context,

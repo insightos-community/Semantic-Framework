@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package security
 
 import (
@@ -20,6 +5,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -152,7 +138,11 @@ func (m *Middleware) WrapToolCall(ctx context.Context, meta kernel.ToolCallMeta,
 	}
 
 	// L2 参数校验：jsonschema 结构校验（类型/必填/枚举）。
-	if err := m.validate(meta.Name, argsJSON); err != nil {
+	checkStart := time.Now()
+	validationErr := m.validate(meta.Name, argsJSON)
+	m.logger.Info("agent.contract.tool_check", "tool", meta.Name, "call_id", meta.CallID,
+		"duration_ns", time.Since(checkStart).Nanoseconds(), "valid", validationErr == nil)
+	if err := validationErr; err != nil {
 		m.logger.Info("工具调用被参数校验拦截",
 			"tool", meta.Name, "call_id", meta.CallID, "error", err.Error())
 		return tool.ErrorResult(CodeParamViolation, err.Error(), false), nil

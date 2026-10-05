@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 // Package robotruntime 定义 Server 自动创建机器人运行实例时使用的稳定边界。
 //
 // 该包不知道 MuJoCo、厂商接口或具体进程命令。SimulationService 提供已经启动的
@@ -126,6 +111,12 @@ type Bundle struct {
 	Version string   `json:"version" yaml:"version"`
 	Path    string   `json:"path" yaml:"path"`
 	Match   MatchKey `json:"match" yaml:"match"`
+
+	// ReadinessTimeout 来自 bundle.yaml 的 spec.runtime.readinessTimeout。
+	// 冷启动要加载大模型的 Bundle（如 Franka + SmolVLA）比普通仿真 Bundle
+	// 需要更长的收敛时间，所以由包自带而不是全局限定；零值表示未声明，
+	// 由调用方回退到默认值。
+	ReadinessTimeout time.Duration `json:"readiness_timeout,omitempty" yaml:"readiness_timeout,omitempty"`
 }
 
 // StartRequest 是上层根据 RobotDeployment 形成的启动输入。InstanceID 可省略，

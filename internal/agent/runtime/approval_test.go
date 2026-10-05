@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package runtime
 
 import (
@@ -32,11 +17,18 @@ import (
 	"insightos.cn/semantic-framework/internal/interaction"
 	"insightos.cn/semantic-framework/internal/server/ws"
 	"insightos.cn/semantic-framework/internal/store"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/internal/tool"
 	"insightos.cn/semantic-framework/pkg/config"
 	"insightos.cn/semantic-framework/pkg/llm"
 	"insightos.cn/semantic-framework/pkg/log"
 )
+
+// runtimeEventWait 是本包用例里“等待某件事最终发生”的期限：进入模型、
+// 审批唤醒、Run 收尾都保证会发生，这里的期限只用于避免测试挂死，不用来
+// 断言响应速度。CI Runner 比本机慢一个数量级，共享 Runner 的负载波动又很大，
+// 5 秒在满载 Runner 上曾把正常完成判成失败。
+const runtimeEventWait = 20 * time.Second
 
 // approvalFixture 是审批链路单测的装配：带工具范围与审批名单的 leader
 // profile、高危测试工具、真实交互服务。
@@ -105,16 +97,8 @@ func newApprovalFixture(t *testing.T, summary string) *approvalFixture {
 	if err != nil {
 		t.Fatalf("构建 LLM 注册表失败: %v", err)
 	}
-	st, err := store.Open(config.StoreConfig{
-		Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	}, logger)
-	if err != nil {
-		t.Fatalf("Open 失败: %v", err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate 失败: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	// 与 newTestFixture 一致：复用共享模板的私有副本，避免重复支付迁移成本。
+	st := storetest.OpenMigrated(t, logger)
 
 	m := kernel.NewMockChatModel()
 	m.SetScript(
@@ -222,8 +206,8 @@ func TestApprovalFlowApproved(t *testing.T) {
 	var result runResult
 	select {
 	case result = <-resultCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("批准后 HandleMessage 未在 5s 内完成")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("批准后 HandleMessage 未在 %s 内完成", runtimeEventWait)
 	}
 	if result.err != nil {
 		t.Fatalf("HandleMessage 失败: %v", result.err)
@@ -286,8 +270,8 @@ func TestApprovalFlowRejected(t *testing.T) {
 		if err != nil {
 			t.Fatalf("拒绝路径 HandleMessage 不应失败: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("拒绝后 HandleMessage 未在 5s 内完成")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("拒绝后 HandleMessage 未在 %s 内完成", runtimeEventWait)
 	}
 	if got := atomic.LoadInt32(fx.saveHits); got != 0 {
 		t.Errorf("拒绝后工具不应执行，实际: %d", got)
@@ -326,8 +310,8 @@ func TestEvictSessionCancelsApproval(t *testing.T) {
 		if err != nil {
 			t.Fatalf("取消路径 HandleMessage 不应失败: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("会话取消后 HandleMessage 未在 5s 内完成")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("会话取消后 HandleMessage 未在 %s 内完成", runtimeEventWait)
 	}
 
 	it, _ = fx.st.GetInteraction(interactionID)

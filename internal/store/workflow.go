@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package store
 
 import (
@@ -949,6 +934,13 @@ func (s *Store) GetSubTask(id string) (SubTask, error) {
 
 func (s *Store) ListSubTasks(taskID string) ([]SubTask, error) {
 	return listSubTasksQuery(s.db, taskID)
+}
+
+// ValidateSubTaskDrafts checks the same graph contract used at persistence time,
+// without assigning IDs into the caller's plan. Agent review can therefore
+// reject an invalid plan inside its correction loop, not after that loop exits.
+func ValidateSubTaskDrafts(items []SubTaskDraft) error {
+	return validateSubTaskDrafts(append([]SubTaskDraft(nil), items...))
 }
 
 func validateSubTaskDrafts(items []SubTaskDraft) error {

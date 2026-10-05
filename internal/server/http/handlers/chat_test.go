@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package handlers
 
 import (
@@ -36,6 +21,7 @@ import (
 	"insightos.cn/semantic-framework/internal/server/auth"
 	"insightos.cn/semantic-framework/internal/server/ws"
 	"insightos.cn/semantic-framework/internal/store"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/config"
 	"insightos.cn/semantic-framework/pkg/llm"
 	"insightos.cn/semantic-framework/pkg/log"
@@ -58,16 +44,7 @@ func newChatTestRouterWithEvents(t *testing.T, allowHost bool,
 	events projectEventBus) (*store.Store, http.Handler) {
 	t.Helper()
 	logger := log.New(log.Options{Level: log.LevelError, Writer: io.Discard})
-	st, err := store.Open(config.StoreConfig{
-		Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	}, logger)
-	if err != nil {
-		t.Fatalf("Open 失败: %v", err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate 失败: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	st := storetest.OpenMigrated(t, logger)
 
 	// REST 创建会话会同步固化 Leader 模型快照，因此测试装配最小 Profile
 	// 和 LLM 注册表，避免用绕过生产约束的空 Runtime。

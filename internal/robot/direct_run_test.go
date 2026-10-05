@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package robot
 
 import (
@@ -158,7 +143,7 @@ func TestFinishDirectRunDoesNotReleaseUnconfirmedPhysicalStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	receiveCommand(t, commands, "execution.start")
-	if _, err := service.st.FinishRunSession(request.RunID, nil, store.RunStatusCompleted, "", time.Now().UTC()); err != nil {
+	if _, err := service.st.FinishRunSession(request.RunID, nil, store.RunStatusFailed, "Agent失败", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.FinishDirectRun(context.Background(), request.RunID); err != nil {
@@ -206,22 +191,23 @@ func TestDirectCancelDuringValidationNeverStartsSkill(t *testing.T) {
 	}
 }
 
-func TestDirectExecutionWaitReturnsAgentCheckpointWithoutReplay(t *testing.T) {
+func TestCompletedDirectConversationKeepsPhysicalExecution(t *testing.T) {
 	service, commands, request := directRunFixture(t)
 	execution, err := runWithValidSkillInput(t, service, commands, "pilot-direct", request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	receiveCommand(t, commands, "execution.start")
-	if err := service.HandlePilotEvent("pilot-direct", "agent.requested", 1,
-		map[string]any{"execution_id": execution.ID, "reason": "需要新的观测"}); err != nil {
+	if _, err := service.st.FinishRunSession(request.RunID, nil, store.RunStatusCompleted, "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	result, err := service.WaitDirectExecution(ctx, execution)
-	if err != nil || result.Status != "waiting_agent" || result.ID != execution.ID {
-		t.Fatalf("waiting_agent 不应无限等待或重跑: %+v %v", result, err)
+	if err := service.FinishDirectRun(context.Background(), request.RunID); err != nil {
+		t.Fatal(err)
+	}
+	pilot, _ := service.st.GetActiveRobotPilot(request.RobotID)
+	stored, _ := service.st.GetRobotExecution(execution.ID)
+	if pilot.CurrentExecutionID != execution.ID || stored.Status == "stopped" || stored.Status == "stopping" {
+		t.Fatalf("对话完成不能结束或释放仍执行中的Skill: pilot=%+v execution=%+v", pilot, stored)
 	}
 	select {
 	case command := <-commands:
@@ -230,17 +216,15 @@ func TestDirectExecutionWaitReturnsAgentCheckpointWithoutReplay(t *testing.T) {
 	}
 }
 
-func TestDirectWaitCancellationStopsPhysicalExecution(t *testing.T) {
+func TestDirectRunCancellationStopsPhysicalExecution(t *testing.T) {
 	service, commands, request := directRunFixture(t)
 	execution, err := runWithValidSkillInput(t, service, commands, "pilot-direct", request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	receiveCommand(t, commands, "execution.start")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := service.WaitDirectExecution(ctx, execution); !errors.Is(err, context.Canceled) {
-		t.Fatalf("应传播取消: %v", err)
+	if err := service.StopDirectRun(context.Background(), request.RunID); err != nil {
+		t.Fatal(err)
 	}
 	receiveCommand(t, commands, "execution.stop")
 	stored, _ := service.st.GetRobotExecution(execution.ID)

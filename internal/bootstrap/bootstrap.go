@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package bootstrap
 
 import (
@@ -24,6 +9,7 @@ import (
 
 	"insightos.cn/semantic-framework/internal/agent/runtime"
 	"insightos.cn/semantic-framework/internal/event"
+	"insightos.cn/semantic-framework/internal/install"
 	"insightos.cn/semantic-framework/internal/mcpregistry"
 	"insightos.cn/semantic-framework/internal/robot"
 	"insightos.cn/semantic-framework/internal/server/aggregate"
@@ -48,7 +34,8 @@ type App struct {
 	logger *log.Logger
 
 	// store 元数据存储，退出时负责关闭。
-	store *store.Store
+	store   *store.Store
+	imports *install.Inbox
 
 	// llmReg LLM 提供方注册表（缺 key 的端点已降级 WARN）。
 	llmReg *llm.Registry
@@ -75,6 +62,7 @@ type App struct {
 	simulation    *simulation.Service
 	robots        *robot.Service
 	managedRobots *managedSceneRobotLifecycle
+	components    *install.ComponentStore
 
 	// toolRegistry 工具注册表（运行期只读；集成测试经 ToolRegistry 访问）。
 	toolRegistry *tool.Registry
@@ -196,6 +184,14 @@ func (a *App) Run(ctx context.Context) error {
 	aggCtx, aggCancel := context.WithCancel(context.Background())
 	defer aggCancel()
 	aggDone := make(chan struct{})
+	// 投递目录扫描与 Server 一起退出，并在关闭数据库前等待本轮导入落盘。
+	importsDone := make(chan struct{})
+	go func() {
+		defer close(importsDone)
+		if a.imports != nil {
+			a.imports.Run(aggCtx, func(err error) { a.logger.WithError(err).Warn("扫描项目导入目录失败") })
+		}
+	}()
 	go func() {
 		defer close(aggDone)
 		a.aggregator.Run(aggCtx)
@@ -204,6 +200,7 @@ func (a *App) Run(ctx context.Context) error {
 	// 聚合器可能在数据库文件开始备份或清理后再次创建 journal/WAL 文件。
 	stopAggregator := func() {
 		aggCancel()
+		<-importsDone
 		select {
 		case <-aggDone:
 		case <-time.After(shutdownTimeout):

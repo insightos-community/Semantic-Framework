@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -53,7 +38,7 @@ func (s *Service) SceneCatalog(profileID string) []SceneCatalogEntry {
 	if s.sceneCatalog == nil {
 		return nil
 	}
-	return s.sceneCatalog.List(profileID)
+	return s.decorateScenePreviews(s.sceneCatalog.List(profileID))
 }
 
 func (s *Service) SceneCatalogVersionID() string {
@@ -258,6 +243,12 @@ func (s *Service) SetRuntimeInstallationEnabled(
 		)
 	}
 	if !enabled && current.Enabled {
+		// 停用安装只管理运行环境；活动场景先走场景停止流程，保留 Robot 的
+		// 安全停止与状态对账，避免设置开关直接切断正在工作的进程。
+		info, probeErr := s.supervisor.Probe(ctx, installationID)
+		if probeErr == nil && info.ActiveInstanceID != "" {
+			return RuntimeInstallationView{}, false, fmt.Errorf("%w: 请先停止 Runtime 中的活动场景", ErrConflict)
+		}
 		if _, err := s.supervisor.StopManaged(ctx, installationID); err != nil {
 			return RuntimeInstallationView{}, false, err
 		}

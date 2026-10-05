@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package main
 
 import (
@@ -31,6 +16,15 @@ import (
 
 	"insightos.cn/semantic-framework/internal/pilot"
 )
+
+// 事件型等待的期限只用于避免测试挂死，不用来断言启动速度：这些事件迟早会发生，
+// 而 CI Runner 比本机慢一个数量级（同一条命令本机约 1 秒，CI 上 3 秒仍不够），
+// 共享 Runner 的负载波动又很大。本地实测注册用时在毫秒级，这里留足余量。
+const pilotEventWait = 20 * time.Second
+
+// Pilot 退出前最多用 15 秒确认没有残留的物理动作（见 runPermanentContext 的
+// stopTimeout），等待停止必须长于该预算，否则会把“仍在安全收尾”误判为失败。
+const pilotStopWait = 20 * time.Second
 
 func TestPermanentPilotRegistersDeploymentAndStopsWithContext(t *testing.T) {
 	af := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,8 +95,12 @@ func TestPermanentPilotRegistersDeploymentAndStopsWithContext(t *testing.T) {
 		if pilot["robot_id"] != "r1pro-test" || pilot["pilot_instance_id"] != "pilot-test" {
 			t.Fatalf("deployment identity not registered: %#v", pilot)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Pilot did not register")
+	case err := <-done:
+		// Pilot 在注册前就退出时，真实原因在 done 里。没有这一分支，任何
+		// 启动错误都会只报“没有注册”，把可诊断的失败变成疑似超时。
+		t.Fatalf("Pilot 在注册前退出: %v", err)
+	case <-time.After(pilotEventWait):
+		t.Fatalf("Pilot 未在 %s 内注册", pilotEventWait)
 	}
 	cancel()
 	select {
@@ -110,8 +108,8 @@ func TestPermanentPilotRegistersDeploymentAndStopsWithContext(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Pilot did not stop after context cancellation")
+	case <-time.After(pilotStopWait):
+		t.Fatalf("Pilot 未在 %s 内停止", pilotStopWait)
 	}
 	reportData, err := os.ReadFile(reportPath)
 	if err != nil {

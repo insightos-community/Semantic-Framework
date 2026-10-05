@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -85,6 +70,17 @@ func TestRuntimePackStrictIntegrityAndContentRequirements(t *testing.T) {
 	if loaded.Runner != "native-mujoco" || len(loaded.Files()) != 7 {
 		t.Fatalf("manifest=%+v", loaded)
 	}
+	// 独立引擎包不需要场景目录或任意具体任务的 smoke 输入。
+	manifest.SceneCatalog = RuntimePackFile{}
+	manifest.SmokeRequest = RuntimePackFile{}
+	manifest.SmokeSceneKey = ""
+	encoded, _ = yaml.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(root, "runtime-pack.yaml"), encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRuntimePack(root); err != nil {
+		t.Fatal("独立 Runtime 加载失败", err)
+	}
 
 	if err := os.WriteFile(filepath.Join(root, "wheels/runtime.whl"), []byte("tampered"), 0o600); err != nil {
 		t.Fatal(err)
@@ -121,5 +117,23 @@ func TestRuntimeContentEnvironmentNativePaths(t *testing.T) {
 		if _, err := RuntimeContentEnvironment(map[string]string{"mujoco_assets": value}); err == nil {
 			t.Fatalf("accepted non-absolute content path %q", value)
 		}
+	}
+}
+
+func TestBehaviorRuntimeUsesIsolatedRunnerAndNativeData(t *testing.T) {
+	executable, err := RuntimeRunnerExecutable("/runtime-env", "behavior-omnigibson")
+	if err != nil || executable != "/runtime-env/bin/semantic-isaac-runtime" {
+		t.Fatalf("Isaac Runtime 入口错误: %s %v", executable, err)
+	}
+	env, err := RuntimeContentEnvironment(map[string]string{"behavior_data": "/native/data"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range env {
+		found = found || item == "OMNIGIBSON_DATA_PATH=/native/data"
+	}
+	if !found {
+		t.Fatal("未传递原生资产目录")
 	}
 }

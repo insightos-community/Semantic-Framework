@@ -1,25 +1,9 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package bootstrap
 
 import (
 	"context"
 	"encoding/json"
 	"io"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -27,7 +11,7 @@ import (
 	"insightos.cn/semantic-framework/internal/server/ws"
 	"insightos.cn/semantic-framework/internal/simulation"
 	"insightos.cn/semantic-framework/internal/store"
-	"insightos.cn/semantic-framework/pkg/config"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/log"
 )
 
@@ -55,16 +39,7 @@ func TestSnapshotRobotKeepsRuntimeVisualReference(t *testing.T) {
 }
 
 func TestSimulationCheckpointOnlyAdvancesChangedEntityRevision(t *testing.T) {
-	st, err := store.Open(config.StoreConfig{
-		Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "map.db"),
-	}, log.New(log.Options{Level: log.LevelError, Writer: io.Discard}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	st := storetest.OpenMigrated(t, log.New(log.Options{Level: log.LevelError, Writer: io.Discard}))
 	project, err := st.CreateProject("map-owner", "Map checkpoint")
 	if err != nil {
 		t.Fatal(err)

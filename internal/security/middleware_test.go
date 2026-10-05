@@ -1,25 +1,9 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package security
 
 import (
 	"context"
 	"encoding/json"
 	"io"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -28,8 +12,8 @@ import (
 
 	"insightos.cn/semantic-framework/internal/agent/kernel"
 	"insightos.cn/semantic-framework/internal/store"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/internal/tool"
-	"insightos.cn/semantic-framework/pkg/config"
 	"insightos.cn/semantic-framework/pkg/log"
 )
 
@@ -410,15 +394,5 @@ func TestApprovalGateEndToEnd(t *testing.T) {
 // openSecurityTestStore 在临时目录打开一个已迁移的 Store（测试结束自动关闭）。
 func openSecurityTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(config.StoreConfig{
-		Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	}, log.New(log.Options{Level: log.LevelError, Writer: io.Discard}))
-	if err != nil {
-		t.Fatalf("Open 失败: %v", err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate 失败: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	return st
+	return storetest.OpenMigrated(t, log.New(log.Options{Level: log.LevelError, Writer: io.Discard}))
 }

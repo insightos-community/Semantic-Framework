@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package workflow
 
 import (
@@ -20,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +16,7 @@ import (
 	interactionsvc "insightos.cn/semantic-framework/internal/interaction"
 	"insightos.cn/semantic-framework/internal/server/ws"
 	"insightos.cn/semantic-framework/internal/store"
-	"insightos.cn/semantic-framework/pkg/config"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/log"
 )
 
@@ -287,15 +271,7 @@ func (e *controlledExecutor) ExecuteTask(ctx context.Context, execution TaskExec
 func openWorkflowStore(t *testing.T) *store.Store {
 	t.Helper()
 	logger := log.New(log.Options{Level: log.LevelError, Writer: io.Discard})
-	st, err := store.Open(config.StoreConfig{Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "workflow.db")}, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	return st
+	return storetest.OpenMigrated(t, logger)
 }
 
 func createWorkflowProject(t *testing.T, st *store.Store) (store.Project, store.ChatSession) {
@@ -353,20 +329,26 @@ func newWorkflowFixture(t *testing.T) (*store.Store, store.Project, store.ChatSe
 	return st, project, conversation, service, planner, executor
 }
 
+// workflowEventWait 是这些用例里“等待某件事最终发生”的期限：Task 启动、
+// 事件广播、Task Agent 开始规划都保证会发生，期限只用于避免测试挂死，不用来
+// 断言调度速度。CI Runner 比本机慢一个数量级，共享 Runner 的负载波动又很大，
+// 3 秒在满载 Runner 上曾把正常调度判成失败。
+const workflowEventWait = 20 * time.Second
+
 func receiveExecution(t *testing.T, executor *controlledExecutor) TaskExecution {
 	t.Helper()
 	select {
 	case execution := <-executor.started:
 		return execution
-	case <-time.After(3 * time.Second):
-		t.Fatal("等待 Developer Task 启动超时")
+	case <-time.After(workflowEventWait):
+		t.Fatalf("等待 Developer Task 启动超过 %s", workflowEventWait)
 		return TaskExecution{}
 	}
 }
 
 func waitWorkflowStatus(t *testing.T, st *store.Store, id, status string) store.WorkflowView {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(workflowEventWait)
 	for time.Now().Before(deadline) {
 		view, err := st.GetWorkflowView(id)
 		if err == nil && view.Workflow.Status == status {
@@ -608,7 +590,7 @@ func TestWorkflowPublishesProjectResourceEvents(t *testing.T) {
 		Executor: &controlledExecutor{started: make(chan TaskExecution, 1), release: make(chan struct{}, 1)}})
 	_, _ = approveTestPlan(t, service, project, conversation, store.WorkflowDraft{Goal: "事件"})
 	want := map[string]bool{"workflow": false, "chat_message": false}
-	deadline := time.After(3 * time.Second)
+	deadline := time.After(workflowEventWait)
 	for !(want["workflow"] && want["chat_message"]) {
 		select {
 		case value := <-ch:
@@ -972,8 +954,8 @@ func TestAssignedTaskPublishesRobotAgentPlanningState(t *testing.T) {
 	}
 	select {
 	case <-planner.started:
-	case <-time.After(time.Second):
-		t.Fatal("Task Agent 规划未启动")
+	case <-time.After(workflowEventWait):
+		t.Fatalf("Task Agent 规划未在 %s 内启动", workflowEventWait)
 	}
 	planning, err := st.GetTask(view.Tasks[0].ID)
 	if err != nil {

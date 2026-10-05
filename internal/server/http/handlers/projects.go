@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package handlers
 
 import (
@@ -28,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"insightos.cn/semantic-framework/internal/event"
+	"insightos.cn/semantic-framework/internal/install"
 	"insightos.cn/semantic-framework/internal/server/auth"
 	"insightos.cn/semantic-framework/internal/server/ws"
 	"insightos.cn/semantic-framework/internal/store"
@@ -62,6 +48,10 @@ type ProjectSimulationLifecycle interface {
 // Snapshot 的公共接口。runtime 使用 any 保存，使 Store/API 分支可先独立合并；
 // 精确取消未装配时明确返回 503，不伪造已经取消。
 type ProjectsHandler struct {
+	imports             *install.Inbox
+	components          *install.ComponentStore
+	componentRemoval    func(context.Context, install.InstalledComponent) error
+	componentApply      func(context.Context, string, string) error
 	st                  *store.Store
 	runtime             any
 	workflowApp         WorkflowApplication

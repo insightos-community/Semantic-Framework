@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package workflow
 
 import (
@@ -94,7 +79,15 @@ func (s *Service) OnRobotExecutionChanged(ctx context.Context, execution store.R
 			if actionErr != nil {
 				return actionErr
 			}
-			if safelyStoppedRobotExecution(execution) || !started {
+			held, heldErr := s.robotExecutionSafelyHeld(execution.ID)
+			if heldErr != nil {
+				return heldErr
+			}
+			if safelyStoppedRobotExecution(execution) || held {
+				return s.finishStoppingRobotSubTask(ctx, task, subTask, execution,
+					"robot_execution_failed_but_held")
+			}
+			if !started {
 				return s.finishStoppingRobotSubTask(ctx, task, subTask, execution,
 					"robot_execution_failed_before_action")
 			}
@@ -106,6 +99,16 @@ func (s *Service) OnRobotExecutionChanged(ctx context.Context, execution store.R
 			return actionErr
 		}
 		if physicalStarted {
+			held, heldErr := s.robotExecutionSafelyHeld(execution.ID)
+			if heldErr != nil {
+				return heldErr
+			}
+			if safelyStoppedRobotExecution(execution) || held {
+				// 物理动作已发生，但 Ability 已留下安全保持证据（策略超时、
+				// 异常自终止同样由它撤销执行并核对 hold）。任务未达成而物理
+				// 状态可判定，直接收敛为 stopped，而不是永久 execution_state_unknown。
+				return s.finishConfirmedRobotStop(ctx, task, subTask, execution)
+			}
 			// 物理Action已经改变Robot或场景，但失败结果没有明确hold证据。
 			// 此时不能启动Recovery重放原Skill，必须保留Robot锁等待对账。
 			return s.pauseRobotSubTask(task, subTask, "execution_state_unknown",
@@ -178,6 +181,10 @@ func (s *Service) finishConfirmedRobotStop(ctx context.Context, task store.Task,
 		// 暂时回到 paused；后一台确认时必须继续保留人工确认原因，不能被通用
 		// robot_execution_stopped 覆盖，否则成功请求将失去幂等识别依据。
 		stopReason = "operator_confirmed_stop"
+	} else if execution.Status == "failed" {
+		// 任务失败但已被证明安全保持：收敛为 stopped 的同时保留真实原因，
+		// 不冒充成功停止，也不冒充任务失败后物理状态未知。
+		stopReason = "robot_execution_failed_but_held"
 	}
 	workflowValue, err := s.st.GetWorkflow(task.WorkflowID)
 	if err != nil {
@@ -230,6 +237,43 @@ func (s *Service) finishConfirmedRobotStop(ctx context.Context, task store.Task,
 func safelyStoppedRobotExecution(execution store.RobotExecution) bool {
 	safe, _ := execution.Result["safe"].(bool)
 	return safe
+}
+
+// robotExecutionSafelyHeld 从 Action 事实流读取物理安全保持证据。Ability 是
+// 物理状态的唯一权威：撤销执行后它显式 hold 并核对 in_hold，把 safe 证据写进
+// 该次 Action 的 result，随 action.terminal 事件持久化。这里按发生顺序重建
+// "最后一个物理事实"：每次 physical_started 的 action.started 都推翻此前的保持
+// 证明，只有其后的安全保持证明才重新成立。Skill 层的失败文案不参与判定。
+func (s *Service) robotExecutionSafelyHeld(executionID string) (bool, error) {
+	held := false
+	var after int64
+	for {
+		events, err := s.st.ListRobotExecutionEvents(executionID, after, 1000)
+		if err != nil {
+			return false, err
+		}
+		for _, item := range events {
+			after = item.Sequence
+			switch item.Type {
+			case "action.started":
+				if started, _ := item.Payload["physical_started"].(bool); started {
+					held = false
+				}
+			case "action.terminal":
+				result, ok := item.Payload["result"].(map[string]any)
+				if !ok {
+					continue
+				}
+				if safe, exists := result["safe"].(bool); exists {
+					held = safe
+				}
+			}
+		}
+		if len(events) < 1000 {
+			break
+		}
+	}
+	return held, nil
 }
 
 func (s *Service) launchRobotAgentDecision(parent context.Context, task store.Task,

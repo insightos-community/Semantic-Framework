@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package kernel
 
 import (
@@ -183,7 +168,8 @@ func (h *TraceHandler) OnEndWithStreamOutput(ctx context.Context, info *callback
 	return ctx
 }
 
-// WaitStreams is called after the producer has finished registering callbacks.
+// WaitStreams 只在一次 Run 的终态调用。中断流不得 Wait：Resume 会继续
+// 向同一个 WaitGroup Add，重叠 Wait/Add 会被 -race 判为 data race。
 func (h *TraceHandler) WaitStreams() { h.streams.Wait() }
 
 func (h *TraceHandler) recordStream(ctx context.Context, info *callbacks.RunInfo,

@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package ws
 
 import (
@@ -21,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,8 +14,7 @@ import (
 
 	"insightos.cn/semantic-framework/internal/server/auth"
 	"insightos.cn/semantic-framework/internal/simulation"
-	"insightos.cn/semantic-framework/internal/store"
-	"insightos.cn/semantic-framework/pkg/config"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/log"
 )
 
@@ -87,16 +70,7 @@ func TestSimulationStreamGatewayForwardsLargePoseFrame(t *testing.T) {
 	defer upstream.Close()
 
 	logger := log.New(log.Options{Level: log.LevelError, Writer: io.Discard})
-	st, err := store.Open(config.StoreConfig{
-		Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "stream.db"),
-	}, logger)
-	if err != nil {
-		t.Fatalf("打开认证存储失败: %v", err)
-	}
-	defer func() { _ = st.Close() }()
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("迁移认证存储失败: %v", err)
-	}
+	st := storetest.OpenMigrated(t, logger)
 	t.Setenv("SEMANTIC_ADMIN_PASSWORD", "s3cret")
 	authService := auth.NewService(st, logger)
 	if err := authService.SeedAdmin(); err != nil {

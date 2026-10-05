@@ -25,10 +25,10 @@ AbilityFramework endpoint、frame、tool、IK 和安全配置。Skill输入只�
 ## 构建
 
 ```bash
-cd /absolute/path/to/semantic-framework
+cd /home/wwy/agent_refractor/.worktrees/semantic-framework-robot
 go build -o .output/bin/semantic-pilot ./cmd/semantic-pilot
 
-cd /absolute/path/to/semantic-robot-deployment
+cd /home/wwy/agent_refractor/semantic-robot-deployment
 go build -o bin/semantic-robot-instance ./cmd/semantic-robot-instance
 ```
 
@@ -38,8 +38,8 @@ go build -o bin/semantic-robot-instance ./cmd/semantic-robot-instance
 当前工作，然后依次停止 Ability和AF；不会停止 MuJoCo scene Runtime：
 
 ```bash
-DEPLOY_ROOT=/absolute/path/to/semantic-robot-deployment
-FRAMEWORK_ROOT=/absolute/path/to/semantic-framework
+DEPLOY_ROOT=/home/wwy/agent_refractor/semantic-robot-deployment
+FRAMEWORK_ROOT=/home/wwy/agent_refractor/.worktrees/semantic-framework-robot
 INSTANCE_ROOT="$FRAMEWORK_ROOT/.output/v050-mujoco-product/three-skills-instance9"
 
 "$DEPLOY_ROOT/bin/semantic-robot-instance" stop \
@@ -68,8 +68,8 @@ Semantic Web Physics Viewer。
 ## 执行抓取
 
 ```bash
-FRAMEWORK_ROOT=/absolute/path/to/semantic-framework
-SKILLS_ROOT=/absolute/path/to/robot-skill
+FRAMEWORK_ROOT=/home/wwy/agent_refractor/.worktrees/semantic-framework-robot
+SKILLS_ROOT=/home/wwy/agent_refractor/semantic-robot-skills
 INSTANCE_ROOT="$FRAMEWORK_ROOT/.output/v050-mujoco-product/three-skills-instance9"
 BUNDLE_ROOT="$FRAMEWORK_ROOT/.output/v050-mujoco-product/bundle-stable-load"
 

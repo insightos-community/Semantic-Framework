@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package integration
 
 // 本文件是 bootstrap ↔ kernel 接线的黑盒验证：作为独立测试入口直接使用
@@ -39,6 +24,7 @@ import (
 	"insightos.cn/semantic-framework/internal/agent/kernel"
 	"insightos.cn/semantic-framework/internal/bootstrap"
 	"insightos.cn/semantic-framework/internal/store"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/config"
 	"insightos.cn/semantic-framework/pkg/log"
 )
@@ -50,6 +36,7 @@ func wireLLMApp(t *testing.T) *bootstrap.App {
 
 	cfg := config.Default()
 	cfg.Store.SQLitePath = filepath.Join(t.TempDir(), "test.db")
+	storetest.SeedMigratedAt(t, cfg.Store.SQLitePath)
 	cfg.LLM.Default = "mock" // 无 key 环境：默认模型走 mock 驱动
 	cfg.Agents.ProfilesDir = profilesDirAbs(t)
 	logger := log.New(log.Options{Level: log.LevelError, Writer: io.Discard})

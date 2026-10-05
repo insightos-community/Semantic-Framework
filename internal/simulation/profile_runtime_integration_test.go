@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -126,7 +111,7 @@ func TestHTTPRuntimeClientWithRealProfileRuntime(t *testing.T) {
 		t.Fatalf("读取虚拟 Robot 失败: %v", err)
 	}
 	if len(robots) != 1 || robots[0].BackendProfile != info.RuntimeProfileID ||
-		robots[0].SDKPackage != "robot-sdk-franka" || len(robots[0].JointNames) != 7 {
+		robots[0].SDKPackage != "semantic-robot-sdk-franka" || robots[0].Backend != "mujoco" || len(robots[0].JointNames) != 7 {
 		t.Fatalf("Franka Robot 描述与 Profile 不一致: %+v", robots)
 	}
 	robotState, err := client.RobotState(ctx, robots[0].RobotID)

@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package config
 
 import (
@@ -82,6 +67,12 @@ type RobotRuntimeConfig struct {
 	ServerWS   string `yaml:"server_websocket_url"`
 	PortFirst  int    `yaml:"ability_port_first"`
 	PortLast   int    `yaml:"ability_port_last"`
+
+	// ReadinessTimeout 是受管 Robot 启动后等待 AbilityFramework 与 Ability
+	// 就绪的上限。零值表示用内置默认值（2 分钟）。冷启动加载大模型的
+	// Bundle（如 Franka SmolVLA 走 CPU 推理）可能需要更长，可用本项或
+	// 环境变量 SEMANTIC_ROBOT_RUNTIME_READINESS_TIMEOUT 覆盖。
+	ReadinessTimeout Duration `yaml:"readiness_timeout"`
 }
 
 // SkillsConfig 定义技能系统配置（docs/architecture/06）。
@@ -136,6 +127,9 @@ type AgentsConfig struct {
 
 // ServerConfig 定义 HTTP 服务的监听与超时配置。
 type ServerConfig struct {
+	// AccessTokenTTL 用户登录令牌有效期；零值采用认证服务默认值。
+	AccessTokenTTL Duration `yaml:"access_token_ttl"`
+
 	// HTTPAddr HTTP 服务监听地址，如 ":8080"。
 	HTTPAddr string `yaml:"http_addr"`
 
@@ -243,10 +237,11 @@ func (d Duration) String() string {
 func Default() *Config {
 	return &Config{
 		Server: ServerConfig{
-			HTTPAddr:     ":8080",
-			WSAddr:       ":8081",
-			ReadTimeout:  Duration(10 * time.Second),
-			WriteTimeout: Duration(10 * time.Second),
+			AccessTokenTTL: Duration(24 * time.Hour),
+			HTTPAddr:       ":8080",
+			WSAddr:         ":8081",
+			ReadTimeout:    Duration(10 * time.Second),
+			WriteTimeout:   Duration(10 * time.Second),
 		},
 		Log: LogConfig{
 			Level: "info",
@@ -330,6 +325,13 @@ func Load(path string) (*Config, error) {
 // 例如 SEMANTIC_SERVER_HTTP_ADDR 覆盖 server.http_addr。
 // 时长类环境变量值非法时直接报错，避免静默使用非预期配置启动服务。
 func applyEnv(cfg *Config) error {
+	if v, ok := os.LookupEnv("SEMANTIC_SERVER_ACCESS_TOKEN_TTL"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("环境变量 SEMANTIC_SERVER_ACCESS_TOKEN_TTL 必须为正时长，例如 720h")
+		}
+		cfg.Server.AccessTokenTTL = Duration(d)
+	}
 	if v, ok := os.LookupEnv("SEMANTIC_SERVER_HTTP_ADDR"); ok {
 		cfg.Server.HTTPAddr = v
 	}
@@ -406,6 +408,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("环境变量 SEMANTIC_ROBOT_RUNTIME_PORT_LAST 值 %q 非法: %w", v, err)
 		}
 		cfg.RobotRuntime.PortLast = port
+	}
+	if v, ok := os.LookupEnv("SEMANTIC_ROBOT_RUNTIME_READINESS_TIMEOUT"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("环境变量 SEMANTIC_ROBOT_RUNTIME_READINESS_TIMEOUT 值 %q 非法: %w", v, err)
+		}
+		cfg.RobotRuntime.ReadinessTimeout = Duration(d)
 	}
 	if v, ok := os.LookupEnv("SEMANTIC_LLM_DEFAULT"); ok {
 		cfg.LLM.Default = v

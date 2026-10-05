@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package store
 
 import (
@@ -75,6 +60,75 @@ func TestPlanProposalApprovalCreatesWorkflowAtomically(t *testing.T) {
 	if err != nil || approved.Status != PlanProposalStatusApproved ||
 		approved.Revision != proposal.Revision+1 {
 		t.Fatalf("Proposal 终态不符: proposal=%+v err=%v", approved, err)
+	}
+}
+
+func TestPlanProposalSubmissionIsIdempotentWithinRun(t *testing.T) {
+	st := openTestStore(t)
+	project, session := v030ProjectConversation(t, st)
+	now := time.Now().UTC()
+	draft := WorkflowDraft{Goal: "move box", Tasks: []TaskDraft{{ID: "one", RequiredRole: "robot", Goal: "move box"}}}
+	first, reused, err := st.SubmitPlanProposalForRun("run-submit-1", project.ID, session.ID,
+		draft, "first", nil, "# first", now)
+	if err != nil || reused || first.Revision != 1 {
+		t.Fatalf("first submission: proposal=%+v reused=%v err=%v", first, reused, err)
+	}
+	draft.Goal = "changed by duplicate model call"
+	second, reused, err := st.SubmitPlanProposalForRun("run-submit-1", project.ID, session.ID,
+		draft, "second", nil, "# second", now.Add(time.Second))
+	if err != nil || !reused || second.ID != first.ID || second.Revision != first.Revision {
+		t.Fatalf("same run must not revise: proposal=%+v reused=%v err=%v", second, reused, err)
+	}
+	current, err := st.GetPlanProposal(first.ID)
+	if err != nil || current.Goal != "move box" || current.DocumentMarkdown != "# first" {
+		t.Fatalf("duplicate changed stored plan: %+v err=%v", current, err)
+	}
+	third, reused, err := st.SubmitPlanProposalForRun("run-submit-2", project.ID, session.ID,
+		draft, "second", nil, "# second", now.Add(2*time.Second))
+	if err != nil || reused || third.ID != first.ID || third.Revision != 2 {
+		t.Fatalf("different run may intentionally revise ready proposal: %+v reused=%v err=%v", third, reused, err)
+	}
+}
+
+// TestPlanProposalReplayReflectsCurrentRevision 锁定重放的语义：返回值必须整体
+// 反映库中当前版本。若把该 Run 当初提交的 revision 贴到已变更的内容或已批准的
+// 状态上，调用方会拿到自相矛盾的对象，并可能 revision 冲突。
+func TestPlanProposalReplayReflectsCurrentRevision(t *testing.T) {
+	st := openTestStore(t)
+	project, session := v030ProjectConversation(t, st)
+	now := time.Now().UTC()
+	draft := WorkflowDraft{Goal: "move box", Tasks: []TaskDraft{{ID: "one", RequiredRole: "robot", Goal: "move box"}}}
+	first, reused, err := st.SubmitPlanProposalForRun("run-replay-a", project.ID, session.ID,
+		draft, "v1", nil, "# v1", now)
+	if err != nil || reused || first.Revision != 1 {
+		t.Fatalf("首次提交: proposal=%+v reused=%v err=%v", first, reused, err)
+	}
+	if _, _, err := st.SubmitPlanProposalForRun("run-replay-b", project.ID, session.ID,
+		draft, "v2", nil, "# v2", now.Add(time.Second)); err != nil {
+		t.Fatalf("另一 Run 修订失败: %v", err)
+	}
+
+	replay, reused, err := st.SubmitPlanProposalForRun("run-replay-a", project.ID, session.ID,
+		draft, "v3", nil, "# v3", now.Add(2*time.Second))
+	if err != nil || !reused {
+		t.Fatalf("重放应复用同一提案: reused=%v err=%v", reused, err)
+	}
+	if replay.Revision != 2 || replay.DocumentMarkdown != "# v2" || replay.Summary != "v2" {
+		t.Fatalf("重放应返回库中当前版本: revision=%d summary=%q doc=%q",
+			replay.Revision, replay.Summary, replay.DocumentMarkdown)
+	}
+	// 返回的 revision 与内容同版本，因此可以直接用于批准。
+	if _, err := st.ApprovePlanProposal(replay.ID, replay.Revision, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("重放返回的 revision 必须可直接批准: %v", err)
+	}
+
+	approved, reused, err := st.SubmitPlanProposalForRun("run-replay-a", project.ID, session.ID,
+		draft, "v4", nil, "# v4", now.Add(4*time.Second))
+	if err != nil || !reused {
+		t.Fatalf("批准后重放: reused=%v err=%v", reused, err)
+	}
+	if approved.Status != PlanProposalStatusApproved || approved.Revision != 3 {
+		t.Fatalf("批准后重放应反映当前状态而非旧 revision: %+v", approved)
 	}
 }
 

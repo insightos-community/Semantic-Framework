@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package runtime
 
 import (
@@ -80,6 +65,10 @@ type DirectRobotLifecycle interface {
 	FinishDirectRun(context.Context, string) error
 }
 
+type RobotSkillContracts interface {
+	DescribeSkillInput(context.Context, string, string, string) (map[string]any, error)
+}
+
 // Deps 是 Service 的依赖集合。
 type Deps struct {
 	// Profiles 角色 profile 加载器。
@@ -126,6 +115,7 @@ type Deps struct {
 	// AllowHostExecution 是服务端宿主执行硬开关；false 时会话不能开启。
 	AllowHostExecution bool
 	DirectRobot        DirectRobotLifecycle
+	SkillContracts     RobotSkillContracts
 }
 
 // sessionRuntime 只保存模型、工具和 middleware 的装配，不承担会话串行控制。
@@ -135,6 +125,9 @@ type sessionRuntime struct {
 
 	// profile 构建时的角色 profile（envelope 归因用）。
 	profile *profile.Profile
+
+	// Purpose runtimes are Run-scoped; output and tool feedback share this cap.
+	contractCorrections *contractCorrectionBudget
 
 	// supportsVision 当前实际模型端点是否声明 image 能力。
 	supportsVision bool
@@ -197,6 +190,7 @@ type Service struct {
 	// allowHostExecution 是服务端宿主执行硬开关。
 	allowHostExecution bool
 	directRobot        DirectRobotLifecycle
+	skillContracts     RobotSkillContracts
 
 	// mu 保护会话运行器与活动 Run。
 	mu sync.Mutex
@@ -254,6 +248,7 @@ func NewService(deps Deps) *Service {
 		skills:             deps.SkillStore,
 		allowHostExecution: deps.AllowHostExecution,
 		directRobot:        deps.DirectRobot,
+		skillContracts:     deps.SkillContracts,
 		sessions:           make(map[string]*sessionRuntime),
 		sessionLocks:       make(map[string]*sync.Mutex),
 		activeRuns:         make(map[string]activeRun),
@@ -265,6 +260,11 @@ func NewService(deps Deps) *Service {
 // SetDirectRobotLifecycle 在启动装配阶段连接已有 Robot 执行服务。
 func (s *Service) SetDirectRobotLifecycle(lifecycle DirectRobotLifecycle) {
 	s.directRobot = lifecycle
+}
+
+// SetRobotSkillContracts is startup wiring, before accepting Agent Runs.
+func (s *Service) SetRobotSkillContracts(contracts RobotSkillContracts) {
+	s.skillContracts = contracts
 }
 
 // SetProfiles 原子替换角色 profile 加载器（agents.profiles_dir 热重载用）。
@@ -930,7 +930,15 @@ func (s *Service) buildConversationAgentRuntime(ctx context.Context, sessionID, 
 		WorkspaceRoot: workspaceRoot,
 		Price:         entry.Price,
 		Purpose:       "chat",
-		Logger:        s.logger,
+		// 直达 Robot 的对话在启动技能后交回执行面板；技能终态由 Pilot
+		// 独立上报，避免模型重复轮询或因对话结束而撤销已接受的动作。
+		ReturnDirectly: func() map[string]bool {
+			if strings.HasPrefix(agentID, "robot:") {
+				return map[string]bool{"robot.run": true}
+			}
+			return nil
+		}(),
+		Logger: s.logger,
 	})
 	if err != nil {
 		return nil, err
@@ -1064,6 +1072,13 @@ func (s *Service) run(ctx context.Context, rt *sessionRuntime, run store.RunSess
 			}
 		case kernel.EventToolResult:
 			s.logger.Debug("工具执行完成", "run_id", runID, "session_id", sessionID, "tool", ev.ToolName)
+			if (ev.ToolName == "plan.suggest" || ev.ToolName == "plan_suggest") && planSuggestionAccepted(ev.Text) {
+				// The successful Proposal submission is the answer. Do not ask the
+				// model for a cosmetic closing sentence after a durable side effect.
+				const reply = "Plan Proposal 已生成，请审阅后再批准执行。"
+				fullText.WriteString(reply)
+				s.publish(ref, rt, EventTypeMessageDelta, MessageDeltaPayload{RunID: runID, Text: reply})
+			}
 			result, truncated := boundedToolResult(ev.Text)
 			matched := false
 			for i := len(activity.Tools) - 1; i >= 0; i-- {
@@ -1097,6 +1112,14 @@ func (s *Service) run(ctx context.Context, rt *sessionRuntime, run store.RunSess
 				runErr = err
 			}
 		case kernel.EventError:
+			if errors.Is(ev.Err, errPlanSubmissionComplete) {
+				turns += ev.Turns
+				usage.PromptTokens += ev.Usage.PromptTokens
+				usage.CompletionTokens += ev.Usage.CompletionTokens
+				usage.TotalTokens += ev.Usage.TotalTokens
+				done = true
+				break
+			}
 			if runErr == nil {
 				runErr = ev.Err
 			}
@@ -1185,6 +1208,16 @@ func (s *Service) run(ctx context.Context, rt *sessionRuntime, run store.RunSess
 		"completion_tokens", usage.CompletionTokens,
 		"total_tokens", usage.TotalTokens)
 	return nil
+}
+
+func planSuggestionAccepted(result string) bool {
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			ProposalID string `json:"plan_proposal_id"`
+		} `json:"data"`
+	}
+	return json.Unmarshal([]byte(result), &envelope) == nil && envelope.OK && envelope.Data.ProposalID != ""
 }
 
 // awaitApproval 处理运行中断（危险工具审批）：状态迁移 waiting_input →

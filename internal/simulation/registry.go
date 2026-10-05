@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -199,6 +184,7 @@ type runtimeSlot struct {
 // RuntimeSupervisor 管理每个 profile 对应的外部进程。一个 Runtime 进程只
 // 运行一个场景，但不同 profile 可以由不同进程并行存在。
 type RuntimeSupervisor struct {
+	slotsMu      sync.Mutex
 	registry     *RuntimeRegistry
 	startTimeout time.Duration
 	slots        map[string]*runtimeSlot
@@ -219,12 +205,16 @@ func (s *RuntimeSupervisor) Ensure(ctx context.Context, profileID string) (Runti
 	if err != nil {
 		return RuntimeInfo{}, err
 	}
-	slot, ok := s.slots[profileID]
+	slot, ok := s.slot(binding.InstallationID, false)
 	if !ok {
 		return RuntimeInfo{}, fmt.Errorf("%w: Runtime profile 未装配 Supervisor", ErrNotFound)
 	}
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
+	binding, err = s.registry.configuredBinding(binding.InstallationID)
+	if err != nil {
+		return RuntimeInfo{}, err
+	}
 	info, actual, probeErr := probeRuntime(ctx, binding)
 	if actual.RuntimeProfileID != "" {
 		s.registry.observe(profileID, actual)
@@ -401,7 +391,7 @@ func (s *RuntimeSupervisor) Probe(ctx context.Context, profileID string) (Runtim
 	if err != nil {
 		return RuntimeInfo{}, err
 	}
-	if slot := s.slots[profileID]; slot != nil {
+	if slot, _ := s.slot(profileID, false); slot != nil {
 		slot.mu.Lock()
 		info.Managed = slot.process != nil && slot.process.Alive()
 		slot.mu.Unlock()
@@ -412,7 +402,7 @@ func (s *RuntimeSupervisor) Probe(ctx context.Context, profileID string) (Runtim
 // StopManaged 只停止由本 Supervisor 启动的进程。外部 endpoint 的 slot 没有
 // process，因此场景 stop 不会关闭用户单独启动或共享的 Runtime。
 func (s *RuntimeSupervisor) StopManaged(ctx context.Context, profileID string) (bool, error) {
-	slot, ok := s.slots[profileID]
+	slot, ok := s.slot(profileID, false)
 	if !ok {
 		return false, fmt.Errorf("%w: Runtime profile 未装配 Supervisor", ErrNotFound)
 	}
@@ -444,10 +434,28 @@ func (s *RuntimeSupervisor) StopManaged(ctx context.Context, profileID string) (
 
 func (s *RuntimeSupervisor) Close(ctx context.Context) error {
 	var result error
-	for profileID := range s.slots {
+	s.slotsMu.Lock()
+	ids := make([]string, 0, len(s.slots))
+	for id := range s.slots {
+		ids = append(ids, id)
+	}
+	s.slotsMu.Unlock()
+	for _, profileID := range ids {
 		if _, err := s.StopManaged(ctx, profileID); err != nil {
 			result = errors.Join(result, err)
 		}
 	}
 	return result
+}
+
+func (s *RuntimeSupervisor) slot(id string, create bool) (*runtimeSlot, bool) {
+	s.slotsMu.Lock()
+	defer s.slotsMu.Unlock()
+	slot, ok := s.slots[id]
+	if !ok && create {
+		slot = &runtimeSlot{}
+		s.slots[id] = slot
+		ok = true
+	}
+	return slot, ok
 }

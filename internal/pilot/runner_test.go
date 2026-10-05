@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
@@ -115,6 +100,27 @@ func TestRunnerReleasesPhysicalLockAfterConfirmedStartRejection(t *testing.T) {
 	}
 	if second.Status != ActionRunning {
 		t.Fatalf("后续 Action 未启动: %#v", second)
+	}
+}
+
+func TestRunnerStopsInterruptedActionWithoutReplaying(t *testing.T) {
+	client := &fakeAbilityClient{startErr: errors.New("lost acknowledgement"), stopErr: errors.New("offline")}
+	runner := NewRunner(testCatalog(), client)
+	first, _ := runner.StartAction(context.Background(), actionRequest("navigation.follow_route", "unknown"))
+	if _, err := runner.Stop(context.Background(), first.ID, "user"); err == nil {
+		t.Fatal("停止未确认必须报告错误并保留锁")
+	}
+	if runner.physicalOwner("r1") != first.ID {
+		t.Fatal("未确认时丢失原执行")
+	}
+	client.stopErr = nil
+	client.stopState = AbilityExecution{Status: "stopped"}
+	stopped, err := runner.Stop(context.Background(), first.ID, "retry")
+	if err != nil || stopped.Status != ActionStopped || runner.physicalOwner("r1") != "" {
+		t.Fatalf("重试停止没有释放已确认的物理锁: %#v %v", stopped, err)
+	}
+	if client.startCalls != 1 {
+		t.Fatal("停止不允许重放动作")
 	}
 }
 

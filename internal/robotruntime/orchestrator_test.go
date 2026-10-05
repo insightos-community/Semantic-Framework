@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package robotruntime
 
 import (
@@ -388,50 +373,72 @@ func TestOrchestratorOnlyReclaimsInterruptedManagedSimulationForAnotherScene(t *
 }
 
 func TestOrchestratorReclaimsSameManagedSceneOnlyAfterRuntimeHold(t *testing.T) {
-	bundle := testBundle()
-	bundle.Match.Backend = "mujoco"
-	bundle.Match.BackendProfile = "mujoco-tote"
-	catalog, _ := NewCatalog(bundle)
-	store := newMemoryRuntimeStore()
-	ports := newMemoryPorts()
-	launcher := &fakeLauncher{unconfirmedSafeRobot: "robot-hold", reclaimConfirmed: true}
-	orchestrator, err := NewOrchestrator(OrchestratorConfig{
-		Catalog: catalog, Store: store, Ports: ports, Launcher: launcher,
-		DataRoot: t.TempDir(), PortFirst: 19400, PortLast: 19410,
-	})
-	if err != nil {
+	for _, backend := range []string{"mujoco", "isaac"} {
+		t.Run(backend, func(t *testing.T) {
+			bundle := testBundle()
+			bundle.Match.Backend = backend
+			bundle.Match.BackendProfile = "mujoco-tote"
+			catalog, _ := NewCatalog(bundle)
+			store := newMemoryRuntimeStore()
+			ports := newMemoryPorts()
+			launcher := &fakeLauncher{unconfirmedSafeRobot: "robot-hold", reclaimConfirmed: true}
+			orchestrator, err := NewOrchestrator(OrchestratorConfig{
+				Catalog: catalog, Store: store, Ports: ports, Launcher: launcher,
+				DataRoot: t.TempDir(), PortFirst: 19400, PortLast: 19410,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			descriptor := testDescriptor("robot-hold")
+			descriptor.Backend = backend
+			descriptor.BackendProfile = "mujoco-tote"
+			descriptor.SceneInstanceID = "scene-held"
+			started, err := orchestrator.Start(context.Background(), StartRequest{
+				InstanceID: "instance-held", PilotInstanceID: "pilot-held", Descriptor: descriptor,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			interrupted, err := orchestrator.Stop(context.Background(), started.InstanceID, "pilot offline")
+			if err == nil || interrupted.Status != StateInterrupted {
+				t.Fatalf("测试前置实例没有进入 interrupted: result=%#v err=%v", interrupted, err)
+			}
+			if _, err := orchestrator.ReclaimInterruptedSimulation(
+				context.Background(), interrupted.InstanceID, interrupted.SceneInstanceID,
+				false, "no hold",
+			); err == nil {
+				t.Fatal("同一 Scene 没有 Runtime hold 证据时不得回收")
+			}
+			reclaimed, err := orchestrator.ReclaimInterruptedSimulation(
+				context.Background(), interrupted.InstanceID, interrupted.SceneInstanceID,
+				true, "runtime hold confirmed",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reclaimed.Status != StateStopped || len(launcher.reclaims) != 1 {
+				t.Fatalf("Runtime hold 已确认后没有回收受管实例: result=%#v reclaims=%v",
+					reclaimed, launcher.reclaims)
+			}
+		})
+	}
+}
+
+func TestSimulationReclaimStillRejectsRealRobot(t *testing.T) {
+	catalog, _ := NewCatalog(testBundle())
+	st := newMemoryRuntimeStore()
+	launcher := &fakeLauncher{reclaimConfirmed: true}
+	orchestrator, _ := NewOrchestrator(OrchestratorConfig{Catalog: catalog, Store: st,
+		Ports: newMemoryPorts(), Launcher: launcher, DataRoot: t.TempDir(), PortFirst: 19400, PortLast: 19410})
+	if err := st.SaveRuntimeInstance(context.Background(), RuntimeInstance{InstanceID: "real", RobotID: "real",
+		Backend: "real", Status: StateInterrupted, SceneInstanceID: "scene"}); err != nil {
 		t.Fatal(err)
 	}
-	descriptor := testDescriptor("robot-hold")
-	descriptor.Backend = "mujoco"
-	descriptor.BackendProfile = "mujoco-tote"
-	descriptor.SceneInstanceID = "scene-held"
-	started, err := orchestrator.Start(context.Background(), StartRequest{
-		InstanceID: "instance-held", PilotInstanceID: "pilot-held", Descriptor: descriptor,
-	})
-	if err != nil {
-		t.Fatal(err)
+	if _, err := orchestrator.ReclaimInterruptedSimulation(context.Background(), "real", "scene", true, "test"); err == nil {
+		t.Fatal("仿真恢复不能用于真机")
 	}
-	interrupted, err := orchestrator.Stop(context.Background(), started.InstanceID, "pilot offline")
-	if err == nil || interrupted.Status != StateInterrupted {
-		t.Fatalf("测试前置实例没有进入 interrupted: result=%#v err=%v", interrupted, err)
-	}
-	if _, err := orchestrator.ReclaimInterruptedSimulation(
-		context.Background(), interrupted.InstanceID, interrupted.SceneInstanceID,
-		false, "no hold",
-	); err == nil {
-		t.Fatal("同一 Scene 没有 Runtime hold 证据时不得回收")
-	}
-	reclaimed, err := orchestrator.ReclaimInterruptedSimulation(
-		context.Background(), interrupted.InstanceID, interrupted.SceneInstanceID,
-		true, "runtime hold confirmed",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reclaimed.Status != StateStopped || len(launcher.reclaims) != 1 {
-		t.Fatalf("Runtime hold 已确认后没有回收受管实例: result=%#v reclaims=%v",
-			reclaimed, launcher.reclaims)
+	if len(launcher.reclaims) != 0 {
+		t.Fatal("真机被错误传给进程回收器")
 	}
 }
 

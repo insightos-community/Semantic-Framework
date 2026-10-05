@@ -1,0 +1,161 @@
+# semantic-framework CI：开发 PR、合入 MR、主干、发布四层监督。
+# 1) 功能分支 push = 开发 PR：每次推送验快路径
+# 2) MR 到 develop/默认分支 = 合入门禁：再验一次快路径（相对目标分支）
+# 3) 已开 MR 时不再跑分支 push，避免双跑
+# 4) develop / 夜间 / 标签才晋升 Fake、MuJoCo；规范标签才 CD
+workflow:
+  auto_cancel:
+    on_new_commit: conservative
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH)'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$/'
+    - when: never
+
+stages: [validate, test, security, build, gate, package, publish, release]
+
+default:
+  interruptible: true
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+variables:
+  GIT_DEPTH: "0"
+  CHANGELOG_FILE: "CHANGELOG.md"
+  PACKAGE_REGISTRY_NAME: "$CI_PROJECT_PATH_SLUG"
+  GOPATH: "$CI_PROJECT_DIR/.go"
+  GOCACHE: "$CI_PROJECT_DIR/.go/cache"
+  GOBIN: "$CI_PROJECT_DIR/.go/bin"
+  GOPROXY: "https://goproxy.cn,https://mirrors.aliyun.com/goproxy/,direct"
+  GOSUMDB: "sum.golang.google.cn"
+  CI_IMAGE_GOLANG: "swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/golang:1.23.5"
+  CI_IMAGE_ALPINE: "swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/alpine:3.22"
+  CI_IMAGE_RELEASE_CLI: "docker.1ms.run/registry.gitlab.com/gitlab-org/release-cli:v0.24.0"
+  GITHUB_PROXY: "https://ghfast.top/"
+  GOLANGCI_LINT_VERSION: "1.64.8"
+  GITLEAKS_VERSION: "8.24.2"
+  ALPINE_MIRROR: "https://mirrors.aliyun.com/alpine"
+
+.verify_rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH)'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$/'
+    - when: never
+
+.go_code_rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH)'
+      changes:
+        - "**/*.go"
+        - go.mod
+        - go.sum
+        - Makefile
+        - ci/**/*
+        - tests/**/*
+        - .gitlab-ci.yml
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$/'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH'
+      changes:
+        - "**/*.go"
+        - go.mod
+        - go.sum
+        - Makefile
+        - ci/**/*
+        - tests/**/*
+        - .gitlab-ci.yml
+    - when: never
+
+.simulation_contract_rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CI_DEFAULT_BRANCH)'
+      changes:
+        - internal/simulation/**/*
+        - ci/**/*
+        - Makefile
+        - .gitlab-ci.yml
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "develop" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$/'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH'
+      changes:
+        - internal/simulation/**/*
+        - ci/**/*
+        - Makefile
+        - .gitlab-ci.yml
+    - when: never
+
+.v040_real_rules:
+  interruptible: false
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v0\.4\.[0-9]+(-rc\.[0-9]+)?$/'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - when: never
+
+.v050_fake_rules:
+  interruptible: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_TAG =~ /^v0\.5\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$/'
+    - when: never
+
+.v050_mujoco_rules:
+  interruptible: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_TAG =~ /^v0\.5\.[0-9]+(-rc\.[0-9]+)?$/'
+    - if: '$CI_COMMIT_TAG =~ /^v0\.5\.[0-9]+$/'
+    - when: never
+
+.go_cache:
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .go/pkg/mod
+      - .go/cache
+      - .go/bin
+    policy: pull-push
+  before_script:
+    - export PATH="$GOBIN:$PATH"
+
+.golang_image:
+  image: $CI_IMAGE_GOLANG
+
+.alpine_image:
+  image: $CI_IMAGE_ALPINE
+
+.release_cli_image:
+  image: $CI_IMAGE_RELEASE_CLI
+
+.release_tag_rules:
+  interruptible: false
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$/'
+    - when: never
+
+include:
+  - local: ci/verify.yml
+  - local: ci/gate.yml
+  - local: ci/release.yml

@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
@@ -216,6 +201,71 @@ func (s *ArtifactStore) Publish(_ context.Context, execution SkillExecution, pat
 	return map[string]any{"local_ref": s.localRef(item.LocalID), "sync_status": item.SyncStatus}, nil
 }
 
+func resolveAbilityExchangeFile(root, exchangePath string) (string, error) {
+	cleaned := filepath.Clean(exchangePath)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", ErrArtifactPathOutsideWorkspace
+	}
+	source, err := fileInsideExchangeRoot(root, filepath.Join(root, cleaned))
+	if err == nil {
+		return source, nil
+	}
+	if !exchangeFileMissing(err) {
+		return "", err
+	}
+	// 已安装的旧 Ability 仍会把 Framework 实例 UUID 套在共享根下，却返回
+	// 相对于该子目录的 captures/... 句柄。这里只多看一层直接子目录，
+	// 仍拒绝越出交换根的符号链接和 `..`。
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil {
+		return "", err
+	}
+	var found string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate, candidateErr := fileInsideExchangeRoot(root, filepath.Join(root, entry.Name(), cleaned))
+		if candidateErr != nil {
+			if errors.Is(candidateErr, ErrArtifactPathOutsideWorkspace) {
+				return "", candidateErr
+			}
+			continue
+		}
+		if found != "" && found != candidate {
+			return "", fmt.Errorf("Ability 交换目录存在多个同名证据: %s", cleaned)
+		}
+		found = candidate
+	}
+	if found == "" {
+		return "", err
+	}
+	return found, nil
+}
+
+func fileInsideExchangeRoot(root, candidate string) (string, error) {
+	source, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(root, source)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", ErrArtifactPathOutsideWorkspace
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", ErrArtifactPathOutsideWorkspace
+	}
+	return source, nil
+}
+
+func exchangeFileMissing(err error) bool {
+	return err != nil && os.IsNotExist(err)
+}
+
 func (s *ArtifactStore) ImportAbilityArtifact(ctx context.Context, execution SkillExecution, exchangePath, mediaType, summary string) (map[string]any, error) {
 	// 交换目录不属于 Worker workspace，所以不能放宽 Publish 的路径边界。
 	// 这里先校验相对句柄确实位于受管交换根目录，再复制到当前 Execution
@@ -227,20 +277,9 @@ func (s *ArtifactStore) ImportAbilityArtifact(ctx context.Context, execution Ski
 	if err != nil {
 		return nil, err
 	}
-	source, err := filepath.EvalSymlinks(filepath.Join(root, exchangePath))
+	source, err := resolveAbilityExchangeFile(root, exchangePath)
 	if err != nil {
 		return nil, err
-	}
-	relative, err := filepath.Rel(root, source)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return nil, ErrArtifactPathOutsideWorkspace
-	}
-	sourceInfo, err := os.Stat(source)
-	if err != nil {
-		return nil, err
-	}
-	if !sourceInfo.Mode().IsRegular() {
-		return nil, ErrArtifactPathOutsideWorkspace
 	}
 	workspace, err := s.Workspace(execution)
 	if err != nil {

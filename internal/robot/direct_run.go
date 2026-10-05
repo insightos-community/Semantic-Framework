@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package robot
 
 import (
@@ -20,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"time"
 
 	"insightos.cn/semantic-framework/internal/robotruntime"
 	"insightos.cn/semantic-framework/internal/store"
@@ -95,8 +79,12 @@ func (s *Service) FinishDirectRun(ctx context.Context, runID string) error {
 	if run.Status != store.RunStatusCompleted && run.Status != store.RunStatusFailed && run.Status != store.RunStatusCancelled {
 		return store.ErrInvalidState
 	}
-	if err := s.stopDirectRunExecutions(ctx, runID); err != nil {
-		return err
+	// 正常完成只表示 Agent 已提交 Skill，物理执行继续由 Pilot 持有。
+	// 用户取消或 Agent 失败仍走原有安全停止，不能把两种生命周期混为一体。
+	if run.Status != store.RunStatusCompleted {
+		if err := s.stopDirectRunExecutions(ctx, runID); err != nil {
+			return err
+		}
 	}
 	if pilot, err := s.st.GetActiveRobotPilot(run.RobotID); err == nil {
 		s.publishPilotView(pilot, "robot.run.finished", "robot")
@@ -120,29 +108,4 @@ func (s *Service) stopDirectRunExecutions(ctx context.Context, runID string) err
 		}
 	}
 	return result
-}
-
-// WaitDirectExecution returns the same execution on terminal or agent-input
-// checkpoints. It never retries a Skill or blocks forever awaiting agent input.
-func (s *Service) WaitDirectExecution(ctx context.Context, execution store.RobotExecution) (store.RobotExecution, error) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		current, err := s.st.GetRobotExecution(execution.ID)
-		if err != nil {
-			return execution, err
-		}
-		execution = current
-		if !activeRobotStatus(execution.Status) || execution.Status == "waiting_agent" {
-			return execution, nil
-		}
-		select {
-		case <-ctx.Done():
-			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_ = s.StopDirectRun(stopCtx, execution.RunID)
-			cancel()
-			return execution, ctx.Err()
-		case <-ticker.C:
-		}
-	}
 }

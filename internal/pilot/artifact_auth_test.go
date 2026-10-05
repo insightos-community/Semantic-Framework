@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
@@ -166,5 +151,80 @@ func TestArtifactStoreImportsManagedAbilityEvidenceOnce(t *testing.T) {
 		"越界",
 	); !errors.Is(err, ErrArtifactPathOutsideWorkspace) {
 		t.Fatalf("绝对路径必须拒绝: %v", err)
+	}
+}
+
+func TestArtifactStoreImportsLegacyInstanceNestedAbilityEvidence(t *testing.T) {
+	exchange := t.TempDir()
+	instanceRoot := filepath.Join(exchange, "c28f3bf4-fd25-465c-afda-5cad3ef83205")
+	if err := os.MkdirAll(filepath.Join(instanceRoot, "captures", "invocation"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(instanceRoot, "captures", "invocation", "rgb.jpg")
+	if err := os.WriteFile(source, []byte("legacy-rgb-frame"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret.jpg")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(instanceRoot, "captures", "invocation", "escape.jpg")); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewArtifactStore(t.TempDir(), "")
+	store.PilotInstanceID = "pilot-1"
+	store.AbilityExchangeDirectory = exchange
+	store.Announce = func(SkillExecution, localArtifact) error { return nil }
+	execution := SkillExecution{ID: "execution-legacy-evidence"}
+
+	published, err := store.ImportAbilityArtifact(
+		context.Background(),
+		execution,
+		"captures/invocation/rgb.jpg",
+		"image/jpeg",
+		"旧 Ability 套层后的 RGB",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published["local_ref"] == "" {
+		t.Fatalf("套层证据必须导入为 Pilot Artifact: %#v", published)
+	}
+
+	if _, err := store.ImportAbilityArtifact(
+		context.Background(),
+		execution,
+		"../secret.jpg",
+		"image/jpeg",
+		"越界",
+	); !errors.Is(err, ErrArtifactPathOutsideWorkspace) {
+		t.Fatalf("相对越界路径必须拒绝: %v", err)
+	}
+	if _, err := store.ImportAbilityArtifact(
+		context.Background(),
+		execution,
+		"captures/invocation/escape.jpg",
+		"image/jpeg",
+		"符号链接越界",
+	); !errors.Is(err, ErrArtifactPathOutsideWorkspace) {
+		t.Fatalf("指向交换根外的符号链接必须拒绝: %v", err)
+	}
+
+	duplicate := filepath.Join(exchange, "50c3452f-f455-496d-a6f6-6ed4da9409fa", "captures", "invocation")
+	if err := os.MkdirAll(duplicate, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(duplicate, "rgb.jpg"), []byte("other-frame"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ImportAbilityArtifact(
+		context.Background(),
+		SkillExecution{ID: "execution-ambiguous"},
+		"captures/invocation/rgb.jpg",
+		"image/jpeg",
+		"歧义",
+	); err == nil || !strings.Contains(err.Error(), "多个同名证据") {
+		t.Fatalf("多个套层副本必须拒绝猜测: %v", err)
 	}
 }

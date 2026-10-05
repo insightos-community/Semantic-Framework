@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
@@ -127,6 +112,25 @@ func (r *SkillRuntime) ValidateInput(ctx context.Context, name, version string,
 	return result, nil
 }
 
+// DescribeInput exports the exact installed model without starting a Skill or
+// any Action. Do not cache by name alone: robots may install different versions.
+func (r *SkillRuntime) DescribeInput(ctx context.Context, name, version string) (map[string]any, error) {
+	definition, err := r.skills.Resolve(name, version)
+	if err != nil {
+		return nil, err
+	}
+	worker, err := r.supervisor.Start(ctx, definition)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = worker.Kill() }()
+	if len(worker.inputSchema) == 0 {
+		return nil, errors.New("installed Worker did not export input_schema")
+	}
+	return map[string]any{"name": definition.Name, "version": definition.Version,
+		"input_schema": worker.inputSchema}, nil
+}
+
 func NewSkillRuntime(skills *SkillCatalog, abilities *Catalog, runner *Runner, store SkillExecutionStore, supervisor WorkerSupervisor, agent AgentGateway, observations ObservationSource, events RuntimeEventSink) *SkillRuntime {
 	if store == nil {
 		store = NewMemorySkillExecutionStore()
@@ -201,7 +205,7 @@ func (r *SkillRuntime) Start(ctx context.Context, request SkillStartRequest) (Sk
 	}
 
 	r.mu.Lock()
-	if current := r.activeRobots[request.RobotID]; current != "" {
+	if current := r.activeRobots[request.RobotID]; current != "" || r.runner.physicalOwner(request.RobotID) != "" {
 		r.mu.Unlock()
 		return SkillExecution{}, ErrRobotBusy
 	}
@@ -281,7 +285,7 @@ func (r *SkillRuntime) Stop(ctx context.Context, executionID, source, reason, mo
 	if err != nil {
 		return SkillExecution{}, err
 	}
-	if skillTerminal(execution.Status) {
+	if skillTerminal(execution.Status) && execution.Status != SkillInterrupted {
 		return execution, nil
 	}
 	active := r.getActive(executionID)
@@ -295,7 +299,7 @@ func (r *SkillRuntime) Stop(ctx context.Context, executionID, source, reason, mo
 		if err != nil {
 			return SkillExecution{}, err
 		}
-		if skillTerminal(execution.Status) {
+		if skillTerminal(execution.Status) && execution.Status != SkillInterrupted {
 			return execution, nil
 		}
 	}
@@ -485,6 +489,14 @@ func (r *SkillRuntime) runWorker(ctx context.Context, executionID string, active
 		return
 	}
 	status, _ := result["status"].(string)
+	// Worker 返回 failed 不等于设备动作已结束。保留未知动作的 Skill 和
+	// Robot 占用，让 Server / Web 继续展示原执行并允许停止，而非接纳新任务。
+	if owner := r.runner.physicalOwner(execution.RobotID); owner != "" {
+		if action, loadErr := r.runner.journal.GetActionByID(owner); loadErr == nil && action.SkillExecutionID == executionID {
+			r.interruptSkill(executionID, "PHYSICAL_ACTION_UNCONFIRMED", "物理动作尚未确认结束，请停止当前执行后再启动新任务")
+			return
+		}
+	}
 	switch status {
 	case "completed":
 		execution.Status = SkillCompleted
@@ -492,6 +504,11 @@ func (r *SkillRuntime) runWorker(ctx context.Context, executionID string, active
 	case "failed":
 		execution.Status = SkillFailed
 		execution.Error, _ = result["error"].(map[string]any)
+		// failed 不再丢弃 result：Ability 的安全保持证据（safe/hold）就在这里，
+		// Workflow 靠它区分“失败但已安全保持”和“物理状态未知”。
+		if value, ok := result["result"].(map[string]any); ok {
+			execution.Result = cloneMap(value)
+		}
 	case "stopping":
 		return
 	default:
@@ -700,6 +717,13 @@ func (r *SkillRuntime) startWorkerAction(ctx context.Context, execution SkillExe
 		active.physicalActionStarted = true
 		active.mu.Unlock()
 	}
+	// StartTask 丢失回执时 Runner 仍保存了 Action 和 invocation。必须先关联
+	// 再返回错误，否则 Skill 的停止路径找不到这个仍持有物理锁的 Action。
+	if started.ID != "" {
+		active.mu.Lock()
+		active.actions[key] = started.ID
+		active.mu.Unlock()
+	}
 	if err != nil && !errors.Is(err, ErrReplayForbidden) {
 		return nil, err
 	}
@@ -751,7 +775,7 @@ func (r *SkillRuntime) waitActionResult(ctx context.Context, executionID string,
 		if actionTerminal(execution.Status) {
 			active.mu.Lock()
 			for key, id := range active.actions {
-				if id == actionID {
+				if id == actionID && execution.Status != ActionInterrupted {
 					delete(active.actions, key)
 				}
 			}

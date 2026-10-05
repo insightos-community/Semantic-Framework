@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package workflow
 
 import (
@@ -33,6 +18,11 @@ import (
 // drafting/failed 记录，也不会偷偷启动第二个 Planner。
 func (s *Service) SubmitPlanProposal(_ context.Context, userID, projectID,
 	conversationID string, requested store.WorkflowDraft, summary string, approvedScope json.RawMessage) (store.PlanProposal, error) {
+	return s.SubmitPlanProposalForRun("", userID, projectID, conversationID, requested, summary, approvedScope)
+}
+
+func (s *Service) SubmitPlanProposalForRun(runID, userID, projectID,
+	conversationID string, requested store.WorkflowDraft, summary string, approvedScope json.RawMessage) (store.PlanProposal, error) {
 	_, _, err := s.requireWritableConversation(userID, projectID, conversationID)
 	if err != nil {
 		return store.PlanProposal{}, err
@@ -48,13 +38,15 @@ func (s *Service) SubmitPlanProposal(_ context.Context, userID, projectID,
 	if err := s.validateMapScope(projectID, requested.MapScope); err != nil {
 		return store.PlanProposal{}, err
 	}
-	ready, err := s.st.SubmitPlanProposal(projectID, conversationID, requested, summary,
+	ready, reused, err := s.st.SubmitPlanProposalForRun(runID, projectID, conversationID, requested, summary,
 		approvedScope, renderPlanDocument(requested, summary, approvedScope), time.Now().UTC())
 	if err != nil {
 		return store.PlanProposal{}, fmt.Errorf("保存 Plan Proposal 失败（tasks=%d, dependencies=%d）: %w",
 			len(requested.Tasks), len(requested.Dependencies), err)
 	}
-	s.publishPlanProposal(ready, "plan_proposal.ready")
+	if !reused {
+		s.publishPlanProposal(ready, "plan_proposal.ready")
+	}
 	return ready, nil
 }
 

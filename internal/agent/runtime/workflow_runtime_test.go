@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package runtime
 
 import (
@@ -38,7 +23,7 @@ import (
 )
 
 func newWorkflowRuntimeForTest(t *testing.T, fx *testFixture,
-	model *kernel.MockChatModel) *Service {
+	model kernel.Model) *Service {
 	t.Helper()
 	developerDir := filepath.Join(fx.profileRoot, "developer")
 	if err := os.MkdirAll(developerDir, 0o755); err != nil {
@@ -528,6 +513,30 @@ func TestTaskExecutionGuidanceUsesProjectAgentSkills(t *testing.T) {
 }
 
 func TestRobotTaskExecutionCorrectsFabricatedAcceptedResultInSameRun(t *testing.T) {
+	t.Run("fabricated-accepted", func(t *testing.T) {
+		testRobotExecutionCorrectionBoundary(t, []kernel.MockReply{
+			{Content: `{"kind":"result","summary":"已accepted","evidence":{"execution_id":"rex-fabricated"}}`},
+			{Content: `{"kind":"result","summary":"已accepted","evidence":{"execution_id":"rex-fabricated-again"}}`},
+		})
+	})
+	t.Run("call-shaped-text", func(t *testing.T) {
+		testRobotExecutionCorrectionBoundary(t, []kernel.MockReply{
+			{Content: `{"kind":"call","calls":[{"name":"robot_run","arguments":{}}]}`},
+			{Content: `{"kind":"call","calls":[{"name":"robot_run","arguments":{}}]}`},
+			{Content: `{"kind":"call","calls":[{"name":"robot_run","arguments":{}}]}`},
+		})
+	})
+	t.Run("rejected-tool-then-text-must-not-report-stale-error", func(t *testing.T) {
+		testRobotExecutionCorrectionBoundary(t, []kernel.MockReply{
+			{ToolCalls: []schema.ToolCall{{ID: "bad-input", Type: "function", Function: schema.FunctionCall{Name: "robot_run", Arguments: `{}`}}}},
+			{Content: `{"kind":"call","calls":[{"name":"robot_run","arguments":{}}]}`},
+			{Content: `{"kind":"call","calls":[{"name":"robot_run","arguments":{}}]}`},
+		})
+	})
+}
+
+func testRobotExecutionCorrectionBoundary(t *testing.T, replies []kernel.MockReply) {
+	t.Helper()
 	fx := newTestFixture(t)
 	now := time.Now().UTC()
 	archivePath := filepath.Join(t.TempDir(), "place-object.zip")
@@ -597,10 +606,7 @@ stop_actions:
 		t.Fatal(err)
 	}
 	model := kernel.NewMockChatModel()
-	model.SetScript(
-		kernel.MockReply{Content: `{"kind":"result","summary":"已accepted","evidence":{"execution_id":"rex-fabricated"}}`},
-		kernel.MockReply{Content: `{"kind":"result","summary":"已accepted","evidence":{"execution_id":"rex-fabricated-again"}}`},
-	)
+	model.SetScript(replies...)
 	svc := newWorkflowRuntimeForTest(t, fx, model)
 	project, err := fx.st.EnsureDefaultProject("usr-robot-run-correction")
 	if err != nil {
@@ -642,6 +648,7 @@ stop_actions:
 	if err = fx.st.CreateRunSession(run); err != nil {
 		t.Fatal(err)
 	}
+	svc.SetRobotSkillContracts(testSkillContracts{})
 	_, err = svc.ExecuteTask(context.Background(), workflow.TaskExecution{
 		UserID: project.OwnerID, Project: project, Conversation: conversation,
 		Workflow: view.Workflow, Task: task, SubTasks: []store.SubTask{subtasks[0]}, Run: run,
@@ -649,9 +656,15 @@ stop_actions:
 	if err == nil || !strings.Contains(err.Error(), "本Run没有产生可关联的robot.run执行记录") {
 		t.Fatalf("重复伪造accepted必须在同一Run终止: %v", err)
 	}
+	if !strings.Contains(err.Error(), "ROBOT_TOOL_CALL_REQUIRED") || strings.Contains(err.Error(), "最后工具错误") {
+		t.Fatalf("必须报告本轮未发起有效调用，而非历史工具错误: %v", err)
+	}
+	if _, lookupErr := fx.st.GetRobotExecutionBySubTask(subtasks[0].ID); !errors.Is(lookupErr, store.ErrNotFound) {
+		t.Fatalf("不能将普通文本自动转换成物理执行: %v", lookupErr)
+	}
 	inputs := model.CallInputs()
-	if len(inputs) != 2 {
-		t.Fatalf("首次漏调robot.run应在同一Run纠正一次: calls=%d", len(inputs))
+	if len(inputs) != 3 {
+		t.Fatalf("没有真实Execution时最多纠正两次: calls=%d", len(inputs))
 	}
 	var correction strings.Builder
 	for _, message := range inputs[1] {
@@ -662,6 +675,11 @@ stop_actions:
 	if !strings.Contains(correction.String(), "没有持久Robot Execution") ||
 		!strings.Contains(correction.String(), "不得编造execution_id") {
 		t.Fatalf("纠正必须明确以Store事实覆盖模型自报结果: %s", correction.String())
+	}
+	lastMessages := inputs[len(inputs)-1]
+	lastCorrection := lastMessages[len(lastMessages)-1].Content
+	if !strings.Contains(lastCorrection, "ROBOT_TOOL_CALL_REQUIRED") || !strings.Contains(lastCorrection, "原生工具调用") || strings.Contains(lastCorrection, "本次未建立 Execution 的工具错误：") {
+		t.Fatalf("本轮文本错误必须得到专门反馈，而非历史字段错误: %s", lastCorrection)
 	}
 }
 
@@ -811,24 +829,28 @@ func TestPlanningToolPolicyFailsClosedForSideEffects(t *testing.T) {
 	}
 }
 
-func TestNoProgressToolPolicyAllowsOneCorrectionAndStopsRepeatedError(t *testing.T) {
-	policy := &noProgressToolPolicy{next: conversationPlanToolPolicy{}}
+func TestContractToolPolicyCountsFeedbackRoundsNotCalls(t *testing.T) {
+	policy := &contractToolPolicy{next: conversationPlanToolPolicy{}, budget: newContractCorrectionBudget(10)}
 	failure := func(context.Context, string) (string, error) {
 		return `{"ok":false,"error":{"code":"BAD_ARGUMENTS","message":"参数不是合法 JSON","retryable":false}}`, nil
 	}
 	meta := kernel.ToolCallMeta{Name: "plan.suggest"}
 
-	if _, err := policy.WrapToolCall(context.Background(), meta, `{bad`, failure); err != nil {
-		t.Fatalf("第一次参数错误应返回模型纠正: %v", err)
-	}
-	if _, err := policy.WrapToolCall(context.Background(), meta, `{still-bad`, failure); err == nil ||
-		!strings.Contains(err.Error(), "没有新增证据") {
-		t.Fatalf("连续相同错误应终止当前 Run，实际: %v", err)
+	for round := 0; round < 3; round++ {
+		for call := 0; call < 2; call++ {
+			if _, err := policy.WrapToolCall(context.Background(), meta, `{bad`, failure); err != nil {
+				t.Fatalf("同轮工具必须全部返回反馈: %v", err)
+			}
+		}
+		err := policy.BeforeModelRound(context.Background())
+		if (err != nil) != (round == 2) {
+			t.Fatalf("round=%d err=%v", round, err)
+		}
 	}
 }
 
-func TestNoProgressToolPolicyResetsAfterProgress(t *testing.T) {
-	policy := &noProgressToolPolicy{next: planningToolPolicy{}}
+func TestContractToolPolicySuccessDoesNotEraseSiblingFailure(t *testing.T) {
+	policy := &contractToolPolicy{next: planningToolPolicy{}, budget: newContractCorrectionBudget(10)}
 	meta := kernel.ToolCallMeta{Name: "map.query"}
 	failure := func(context.Context, string) (string, error) {
 		return `{"ok":false,"error":{"code":"BAD_ARGUMENTS","message":"缺少查询条件","retryable":false}}`, nil
@@ -843,8 +865,14 @@ func TestNoProgressToolPolicyResetsAfterProgress(t *testing.T) {
 	if _, err := policy.WrapToolCall(context.Background(), meta, `{}`, success); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := policy.WrapToolCall(context.Background(), meta, `{}`, failure); err != nil {
-		t.Fatalf("成功工具调用后相同错误应重新允许一次纠正: %v", err)
+	if err := policy.BeforeModelRound(context.Background()); err != nil || policy.budget.used != 1 {
+		t.Fatalf("同轮成功不能掩盖失败: budget=%d err=%v", policy.budget.used, err)
+	}
+	if _, err := policy.WrapToolCall(context.Background(), meta, `{}`, success); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.BeforeModelRound(context.Background()); err != nil || policy.budget.used != 1 {
+		t.Fatalf("无错误的轮次不消耗纠正预算: budget=%d err=%v", policy.budget.used, err)
 	}
 }
 
@@ -898,7 +926,9 @@ func TestRobotDecisionUsesTaskExecutionRunAndCompactCurrentContext(t *testing.T)
 		SubTask:   store.SubTask{ID: "sub-decision", TaskID: task.ID, Goal: "局部决策"},
 		Execution: store.RobotExecution{ID: "rex-decision", SkillName: "semantic-navigation"},
 		Event: map[string]any{"stage": "plan_route", "reason": "终点位于障碍物中",
-			"response_model": "NavigationAgentDecision"},
+			"response_model": "NavigationAgentDecision", "response_schema": map[string]any{
+				"type": "object", "required": []any{"choice"},
+				"properties": map[string]any{"choice": map[string]any{"enum": []any{"refresh_target"}}}}},
 	})
 	if err != nil || decision["choice"] != "refresh_target" {
 		t.Fatalf("Robot Decision失败: decision=%+v err=%v", decision, err)
@@ -1004,8 +1034,8 @@ func TestTaskPlanningCorrectsInvalidJSONWithinSameRun(t *testing.T) {
 				prompt.WriteString(message.Content)
 			}
 		}
-		if !strings.Contains(prompt.String(), "重复同一错误会终止本 Run") {
-			t.Fatalf("后续交换缺少自适应终止说明: %s", prompt.String())
+		if !strings.Contains(prompt.String(), "纠正次数有上限") || !strings.Contains(prompt.String(), "byte_offset=") {
+			t.Fatalf("后续交换缺少纠正上限与定位信息: %s", prompt.String())
 		}
 	}
 	runs, _, err := fx.st.ListRunSessions(store.RunFilter{ChatSessionID: conversation.ID}, 0, 0)
@@ -1039,5 +1069,249 @@ func TestRobotTaskPlanSpecUsesOnlyInstalledSkillContract(t *testing.T) {
 	explicitNull := `{"summary":"尚未决定姿态","subtasks":[{"id":"sub-nav","kind":"robot_skill","goal":"导航","spec":{"skill_name":"grasp-object","skill_version":"0.3.0","intent":{"target_ref":"slot-1","pose_hint":null}}}]}`
 	if _, err := decodeAndValidateTaskPlan(explicitNull, task, catalog); err != nil {
 		t.Fatalf("Planning intent不应复制Pydantic业务字段校验，执行时再确定参数: %v", err)
+	}
+}
+
+func TestRobotTaskPlanRejectsExecutionHeldStateInIntent(t *testing.T) {
+	task := store.Task{RequiredRole: "robot"}
+	catalog := robotTaskPlanningView{Skills: []robotTaskSkillView{
+		{Name: "semantic-navigation", Version: "0.4.6"},
+		{Name: "grasp-object", Version: "0.4.21"},
+		{Name: "place-object", Version: "0.4.41"},
+	}}
+	allowed := `{"summary":"来源导航","subtasks":[{"id":"nav-to-source","kind":"robot_skill","goal":"导航到来源箱","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"target_ref":"tote-large-l3-r2-c1","source_pallet_ref":"pallet-a","carried_object_ref":null}},"completion_criteria":{"arrived_at_source_workstation":true,"carrying_object":false}}]}`
+	if _, err := decodeAndValidateTaskPlan(allowed, task, catalog); err != nil {
+		t.Fatalf("carried_object_ref 与 completion_criteria.carrying_object 应通过: %v", err)
+	}
+
+	// W-F1-01：来源导航 intent 写入布尔 carrying_object，物理成功后 Gate 判负。
+	f1 := `{"summary":"来源导航","subtasks":[{"id":"subtask-991e9dc7-133d-45fd-900d-4e7782d91b6c","kind":"robot_skill","goal":"导航到来源托盘","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"navigation_goal":"approach_source_object","target_ref":"tote-large-l3-r2-c1","source_pallet_ref":"pallet-a","carrying_object":false}},"completion_criteria":{"arrived_at_source_workstation":true,"carrying_object":false}}]}`
+	if _, err := decodeAndValidateTaskPlan(f1, task, catalog); err == nil {
+		t.Fatal("W-F1-01 的 intent.carrying_object 必须在规划期拒绝")
+	} else if !strings.Contains(err.Error(), "carrying_object") {
+		t.Fatalf("规划错误应点名 carrying_object: %v", err)
+	}
+
+	// W-C0-02：携物导航 intent 也写入了 carrying_object。
+	c0 := `{"summary":"携物导航","subtasks":[{"id":"st-3-nav-to-target","kind":"robot_skill","goal":"携物到目标列","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"action":"navigate_to_target","carried_object_ref":"tote-large-l3-r1-c1","carrying_object":false,"target_ref":"pallet-b-slot-r1-c1"}}}]}`
+	if _, err := decodeAndValidateTaskPlan(c0, task, catalog); err == nil {
+		t.Fatal("携物导航 intent.carrying_object 必须在规划期拒绝")
+	}
+
+	held := `{"summary":"放置","subtasks":[{"id":"place-1","kind":"robot_skill","goal":"放置","spec":{"skill_name":"place-object","skill_version":"0.4.41","intent":{"object_ref":"tote-1","held_object":{"object_ref":"tote-1"}}}}]}`
+	if _, err := decodeAndValidateTaskPlan(held, task, catalog); err == nil {
+		t.Fatal("intent.held_object 必须在规划期拒绝")
+	}
+
+	holding := `{"summary":"来源导航","subtasks":[{"id":"nav-holding","kind":"robot_skill","goal":"导航到来源箱","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"target_ref":"tote-1","holding_object":null}},"completion_criteria":{"carrying_object":false}}]}`
+	if _, err := decodeAndValidateTaskPlan(holding, task, catalog); err == nil {
+		t.Fatal("intent.holding_object 必须在规划期拒绝")
+	} else if !strings.Contains(err.Error(), "holding_object") {
+		t.Fatalf("规划错误应点名 holding_object: %v", err)
+	}
+}
+
+func TestRobotTaskRecoveryRejectsExecutionHeldStateInIntent(t *testing.T) {
+	task := store.Task{RequiredRole: "robot"}
+	catalog := robotTaskPlanningView{Skills: []robotTaskSkillView{
+		{Name: "semantic-navigation", Version: "0.4.6"},
+	}}
+	fail := `{"decision":"fail_task","summary":"无法恢复","replacements":[]}`
+	decision, err := decodeAndValidateTaskRecovery(fail, task, catalog)
+	if err != nil || decision.Decision != "fail_task" {
+		t.Fatalf("fail_task 应通过: decision=%+v err=%v", decision, err)
+	}
+
+	clean := `{"decision":"revise_pending","summary":"重走来源导航","replacements":[{"id":"nav-retry","kind":"robot_skill","goal":"导航到来源箱","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"target_ref":"tote-1","source_pallet_ref":"pallet-a"}},"completion_criteria":{"carrying_object":false}}]}`
+	if _, err := decodeAndValidateTaskRecovery(clean, task, catalog); err != nil {
+		t.Fatalf("干净的恢复步骤应通过: %v", err)
+	}
+
+	dirty := `{"decision":"revise_pending","summary":"重走来源导航","replacements":[{"id":"nav-retry","kind":"robot_skill","goal":"导航到来源箱","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"target_ref":"tote-1","carrying_object":false}}}]}`
+	if _, err := decodeAndValidateTaskRecovery(dirty, task, catalog); err == nil {
+		t.Fatal("恢复 replacements 写入 carrying_object 必须拒绝")
+	} else if !strings.Contains(err.Error(), "carrying_object") {
+		t.Fatalf("恢复错误应点名 carrying_object: %v", err)
+	}
+
+	holding := `{"decision":"revise_pending","summary":"重走来源导航","replacements":[{"id":"nav-retry","kind":"robot_skill","goal":"导航到来源箱","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"target_ref":"tote-1","holding_object":null}}}]}`
+	if _, err := decodeAndValidateTaskRecovery(holding, task, catalog); err == nil {
+		t.Fatal("恢复 replacements 写入 holding_object 必须拒绝")
+	} else if !strings.Contains(err.Error(), "holding_object") {
+		t.Fatalf("恢复错误应点名 holding_object: %v", err)
+	}
+}
+
+// wf1DirtySourceNavPlan 是 W-F1-01 落盘的那条来源导航规划：intent 里写了
+// carrying_object:false，物理执行成功后被 Gate 判 protocol_failed。
+const wf1DirtySourceNavPlan = `{"summary":"来源导航","subtasks":[{"id":"subtask-991e9dc7-133d-45fd-900d-4e7782d91b6c","kind":"robot_skill","goal":"导航到来源托盘 pallet-a 顶层箱 tote-large-l3-r2-c1 的可操作工位，由 Navigation Ability 依据实时场景解析基座位置并确认到达且未携物。","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"navigation_goal":"approach_source_object","target_ref":"tote-large-l3-r2-c1","source_pallet_ref":"pallet-a","carrying_object":false}},"completion_criteria":{"arrived_at_source_workstation":true,"carrying_object":false,"source_object_observed":true},"depends_on":[]}]}`
+
+const wf1CleanSourceNavPlan = `{"summary":"来源导航","subtasks":[{"id":"subtask-991e9dc7-133d-45fd-900d-4e7782d91b6c","kind":"robot_skill","goal":"导航到来源托盘 pallet-a 顶层箱 tote-large-l3-r2-c1 的可操作工位，由 Navigation Ability 依据实时场景解析基座位置并确认到达且未携物。","spec":{"skill_name":"semantic-navigation","skill_version":"0.4.6","intent":{"navigation_goal":"approach_source_object","target_ref":"tote-large-l3-r2-c1","source_pallet_ref":"pallet-a"}},"completion_criteria":{"arrived_at_source_workstation":true,"carrying_object":false,"source_object_observed":true},"depends_on":[]}]}`
+
+func writePublishedRobotSkill(t *testing.T, st *store.Store, name, version, description string) {
+	t.Helper()
+	now := time.Now().UTC()
+	archivePath := filepath.Join(t.TempDir(), name+"-"+version+".zip")
+	output, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(output)
+	manifest, err := writer.Create(name + "/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manifest.Write([]byte("---\nname: " + name + "\ndescription: " + description +
+		"\ncategory: robot_skill\nversion: " + version + "\n---\n# " + name + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.SaveRobotSkillPackage(store.RobotSkillPackage{
+		Name: name, Version: version, Description: description,
+		Category: "robot_skill", PackagePath: archivePath, PublishedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setupWF1PlanningReplay(t *testing.T, robotID string, replies ...kernel.MockReply) (
+	*Service, *kernel.MockChatModel, store.Project, store.ChatSession, store.WorkflowView, store.Task) {
+	t.Helper()
+	fx := newTestFixture(t)
+	now := time.Now().UTC()
+	writePublishedRobotSkill(t, fx.st, "semantic-navigation", "0.4.6", "导航到业务目标")
+	pilot := store.RobotPilot{PilotInstanceID: "pilot-" + robotID, RobotID: robotID,
+		RobotModel: "r1pro", Backend: "fake", Status: "online", RobotStatus: "idle",
+		AbilityFrameworkStatus: "ready", LastSeenAt: now}
+	if err := fx.st.SaveRobotPilot(pilot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.st.SaveRobotPilotSkill(store.RobotPilotSkill{
+		PilotInstanceID: pilot.PilotInstanceID, Name: "semantic-navigation", Version: "0.4.6",
+		Enabled: true, Status: "installed", UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	robotProfileDir := filepath.Join(fx.profileRoot, "robot")
+	if err := os.MkdirAll(robotProfileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(robotProfileDir, "role.yaml"), []byte(
+		"name: robot\nmode: worker\ndescription: Robot Task\nmodel: mock\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(robotProfileDir, "AGENT.md"),
+		[]byte("# Robot\n只处理当前 Robot Task。"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model := kernel.NewMockChatModel()
+	model.SetScript(replies...)
+	svc := newWorkflowRuntimeForTest(t, fx, model)
+	project, err := fx.st.EnsureDefaultProject("usr-" + robotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := store.ChatSession{ID: "cs-" + robotID, UserID: project.OwnerID,
+		ProjectID: project.ID, Title: "W-F1-01 replay", CreatedAt: now, UpdatedAt: now}
+	if err = fx.st.CreateChatSession(conversation); err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := fx.st.SubmitPlanProposal(project.ID, conversation.ID,
+		store.WorkflowDraft{Goal: "搬箱", Tasks: []store.TaskDraft{{
+			ID: "move-l3-r2-c1", RequiredRole: "robot", Goal: "导航到来源箱",
+		}}}, "", json.RawMessage(`{"allowed_skills":["semantic-navigation"]}`), "# 搬箱", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := fx.st.ApprovePlanProposal(proposal.ID, proposal.Revision, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := fx.st.AssignTask(view.Tasks[0].ID, view.Tasks[0].Revision,
+		"robot:"+robotID, pilot.RobotID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, model, project, conversation, view, task
+}
+
+func TestRobotTaskPlanningCorrectsWF1HeldStateInSameRun(t *testing.T) {
+	svc, model, project, conversation, view, task := setupWF1PlanningReplay(t, "r1pro-wf1",
+		kernel.MockReply{Content: wf1DirtySourceNavPlan},
+		kernel.MockReply{Content: wf1CleanSourceNavPlan},
+	)
+	items, err := svc.PlanTask(context.Background(), workflow.TaskPlanRequest{
+		UserID: project.OwnerID, Project: project, Conversation: conversation,
+		Workflow: view.Workflow, Task: store.TaskDraft{
+			ID: task.ID, RequiredRole: "robot", Goal: task.Goal,
+		},
+	})
+	if err != nil || len(items) != 1 || items[0].ID != "subtask-991e9dc7-133d-45fd-900d-4e7782d91b6c" {
+		t.Fatalf("W-F1-01 脏规划应在同一 Run 被纠正: items=%+v err=%v", items, err)
+	}
+	var spec map[string]any
+	if err = json.Unmarshal(items[0].Spec, &spec); err != nil {
+		t.Fatal(err)
+	}
+	intent, _ := spec["intent"].(map[string]any)
+	if _, exists := intent["carrying_object"]; exists {
+		t.Fatalf("纠正后的 intent 仍含 carrying_object: %+v", spec)
+	}
+	if intent["target_ref"] != "tote-large-l3-r2-c1" {
+		t.Fatalf("纠正不得丢掉业务身份: %+v", spec)
+	}
+	var criteria map[string]any
+	if err = json.Unmarshal(items[0].CompletionCriteria, &criteria); err != nil {
+		t.Fatal(err)
+	}
+	if criteria["carrying_object"] != false {
+		t.Fatalf("completion_criteria.carrying_object 应保留: %+v", criteria)
+	}
+
+	calls := model.CallInputs()
+	if len(calls) != 2 {
+		t.Fatalf("应先拒绝再纠正，实际调用 %d 次", len(calls))
+	}
+	var correction strings.Builder
+	for _, message := range calls[1] {
+		if message != nil {
+			correction.WriteString(message.Content)
+		}
+	}
+	if !strings.Contains(correction.String(), "carrying_object") {
+		t.Fatalf("修正提示应点名 carrying_object: %s", correction.String())
+	}
+
+	runs, _, err := svc.st.ListRunSessions(store.RunFilter{ChatSessionID: conversation.ID}, 0, 0)
+	if err != nil || len(runs) != 1 || runs[0].Kind != store.RunKindTaskPlanning ||
+		runs[0].Status != store.RunStatusCompleted {
+		t.Fatalf("纠正必须发生在同一个已完成 Planning Run: runs=%+v err=%v", runs, err)
+	}
+}
+
+func TestRobotTaskPlanningRejectsRepeatedWF1HeldState(t *testing.T) {
+	// The unified contract permits two corrections, including repeated errors;
+	// exhaustion, not the second identical error text, is the stopping condition.
+	svc, model, project, conversation, view, task := setupWF1PlanningReplay(t, "r1pro-wf1-repeat",
+		kernel.MockReply{Content: wf1DirtySourceNavPlan},
+		kernel.MockReply{Content: wf1DirtySourceNavPlan},
+		kernel.MockReply{Content: wf1DirtySourceNavPlan},
+	)
+	_, err := svc.PlanTask(context.Background(), workflow.TaskPlanRequest{
+		UserID: project.OwnerID, Project: project, Conversation: conversation,
+		Workflow: view.Workflow, Task: store.TaskDraft{
+			ID: task.ID, RequiredRole: "robot", Goal: task.Goal,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "carrying_object") {
+		t.Fatalf("模型坚持写 carrying_object 时 Run 必须失败: %v", err)
+	}
+	if !strings.Contains(err.Error(), "纠正预算耗尽") || len(model.CallInputs()) != 3 {
+		t.Fatalf("应在两次纠正后终止 Run: calls=%d err=%v", len(model.CallInputs()), err)
 	}
 }

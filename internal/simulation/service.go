@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -76,6 +61,8 @@ type SceneSourceLinkResolver interface {
 
 // 一个具体 Runtime 仍只允许一个活动场景；Framework 不实现物理或控制算法。
 type Service struct {
+	previewMu       sync.Mutex
+	previewJobs     sync.Map
 	registry        *RuntimeRegistry
 	supervisor      *RuntimeSupervisor
 	state           RuntimeStateStore
@@ -245,6 +232,14 @@ func (s *Service) StartScene(
 		return SceneInstance{}, err
 	}
 	request.RuntimeProfileID = profileID
+	// 本机内容引用只来自已安装场景目录，覆盖客户端输入，避免任意宿主路径进入 Runtime。
+	request.SceneContentRoot = ""
+	if s.sceneCatalog != nil {
+		request.SceneContentRoot, err = s.sceneCatalog.contentRoot(profileID, sceneKey)
+		if err != nil {
+			return SceneInstance{}, err
+		}
+	}
 	var persistedBundle *RuntimeBundle
 	if request.RuntimeBundleID != "" {
 		reader, ok := s.state.(RuntimeBundleReader)
@@ -381,7 +376,7 @@ func (s *Service) SceneOperation(
 		}
 	}
 	var checkpointErr error
-	if operation == "stop" {
+	if operation == "stop" && (state.LastInstance.State == "running" || state.LastInstance.State == "paused") {
 		checkpointErr = s.syncSceneCheckpoint(ctx, projectID, instanceID,
 			"scene_stop_checkpoint", false)
 	}
@@ -824,11 +819,16 @@ func (s *Service) Snapshot(ctx context.Context, projectID string) (ProjectSimula
 		return result, nil
 	}
 	result.Instance = &instance
-	result.Robots, _ = binding.Client.Robots(ctx, state.InstanceID)
-	// 原生评测用于重连后的证据回看；读取失败不应使场景和停止入口一起消失。
-	if binding.Profile.Capabilities.NativeEvaluator && (s.sceneCatalog == nil || state.Evaluation != nil) {
-		if evaluation, evaluationErr := binding.Client.SceneEvaluation(ctx, state.InstanceID); evaluationErr == nil && evaluation.Generation == instance.Generation {
-			result.Evaluation = &evaluation
+	// 原生引擎加载期间，Robot/评测读取需要等待仿真线程。状态快照必须先返回
+	// starting 等生命周期状态，不能排队等资产加载，令已接受的启动请求在 Web
+	// 上再次超时。只有 running/paused 才读取引擎数据；状态变更仍在下方持久化。
+	if instance.State == "running" || instance.State == "paused" {
+		result.Robots, _ = binding.Client.Robots(ctx, state.InstanceID)
+		// 原生评测用于重连后的证据回看；读取失败不应使场景和停止入口一起消失。
+		if binding.Profile.Capabilities.NativeEvaluator && (s.sceneCatalog == nil || state.Evaluation != nil) {
+			if evaluation, evaluationErr := binding.Client.SceneEvaluation(ctx, state.InstanceID); evaluationErr == nil && evaluation.Generation == instance.Generation {
+				result.Evaluation = &evaluation
+			}
 		}
 	}
 	stateChanged := state.LastInstance == nil ||
@@ -875,7 +875,10 @@ func lastKnownInstance(state ProjectRuntimeState) *SceneInstance {
 	return &copy
 }
 
-func (s *Service) Close(ctx context.Context) error { return s.supervisor.Close(ctx) }
+func (s *Service) Close(ctx context.Context) error {
+	s.previewJobs.Range(func(_, value any) bool { value.(context.CancelFunc)(); return true })
+	return s.supervisor.Close(ctx)
+}
 
 func (s *Service) projectRuntime(
 	projectID, instanceID string,

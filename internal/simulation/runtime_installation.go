@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -40,6 +25,7 @@ const runtimeInstallationSchemaVersion = 2
 // Command/Workdir/Endpoint 只在 Server 内使用，公共接口必须返回 Public() 的脱敏
 // 视图。命令始终以 argv 直接执行，不经过 shell；环境变量也只能按名称引用。
 type RuntimeInstallation struct {
+	SettingsPath         string            `yaml:"settings_path,omitempty" json:"-"`
 	SchemaVersion        int               `yaml:"schema_version" json:"schema_version"`
 	InstallationID       string            `yaml:"installation_id" json:"installation_id"`
 	Profile              RuntimeProfile    `yaml:"profile" json:"profile"`
@@ -243,6 +229,7 @@ func validateRuntimeInstallation(item *RuntimeInstallation) error {
 		}
 		for label, path := range map[string]string{
 			"pack_path": item.PackPath, "scene_catalog_path": item.SceneCatalogPath,
+			"settings_path": item.SettingsPath,
 		} {
 			if path == "" {
 				continue
@@ -428,6 +415,12 @@ func (i RuntimeInstallation) Binding() RuntimeBinding {
 		if i.SchemaVersion == runtimeInstallationSchemaVersion {
 			env, _ = RuntimeContentEnvironment(i.ContentRefs)
 			env = append(env, RuntimeEndpointEnvironment(i.Endpoint)...)
+			// 同一入口可以装载多个 Profile；正式启动与安装 smoke 使用同一份
+			// Profile 身份，安装实例 ID 仅用于进程管理，不传给场景加载器。
+			env = append(env, "SEMANTIC_SIM_PROFILE="+i.Profile.RuntimeProfileID)
+			if i.SettingsPath != "" {
+				env = append(env, "SEMANTIC_RUNTIME_CONFIG="+i.SettingsPath)
+			}
 		} else {
 			for key, envName := range i.EnvironmentRefs {
 				if value := os.Getenv(envName); value != "" {
@@ -456,7 +449,9 @@ func RuntimeEndpointEnvironment(endpoint string) []string {
 	if host == "" || port == "" {
 		return nil
 	}
-	return []string{"PLUGIN_MUJOCO_HOST=" + host, "PLUGIN_MUJOCO_PORT=" + port}
+	// 新 Runtime 使用引擎无关的地址变量；保留既有变量供已发布 MuJoCo 包使用。
+	return []string{"PLUGIN_MUJOCO_HOST=" + host, "PLUGIN_MUJOCO_PORT=" + port,
+		"SEMANTIC_RUNTIME_HOST=" + host, "SEMANTIC_RUNTIME_PORT=" + port}
 }
 
 func cloneStrings(input map[string]string) map[string]string {

@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package http
 
 import (
@@ -118,7 +103,11 @@ func NewRouter(logger *log.Logger, authSvc *auth.Service, chatH *handlers.ChatHa
 		if simulationH != nil {
 			r.Route("/simulation", func(r chi.Router) {
 				r.Get("/runtime-installations", simulationH.HandleRuntimeInstallations)
+				r.Delete("/runtime-installations/{installation_id}", simulationH.HandleUninstallRuntime)
+				r.Post("/runtime-installations/reload", simulationH.HandleReloadResources)
 				r.Get("/scene-catalog", simulationH.HandleSceneCatalog)
+				r.Get("/scene-previews/{key}/{file}", simulationH.HandleScenePreviewImage)
+				r.Get("/scene-preview-assets/{scene_id}", simulationH.HandleBundledScenePreviewImage)
 				r.Post("/runtime-installations/{installation_id}/probe", simulationH.HandleProbeRuntimeInstallation)
 				r.Post("/runtime-installations/{installation_id}/start-test", simulationH.HandleTestRuntimeInstallation)
 				r.Post("/runtime-installations/{installation_id}/stop", simulationH.HandleStopRuntimeInstallation)
@@ -132,6 +121,21 @@ func NewRouter(logger *log.Logger, authSvc *auth.Service, chatH *handlers.ChatHa
 			r.Get("/", projectsH.HandleListProjects)
 			r.Post("/", projectsH.HandleCreateProject)
 			r.Get("/{id}", projectsH.HandleGetProject)
+			r.Get("/{id}/imports", projectsH.HandleListImports)
+			if simulationH != nil {
+				r.Post("/{id}/scene-previews/{scene_id}", simulationH.HandlePrepareScenePreviews)
+				r.Post("/{id}/scene-previews/{scene_id}/cancel", simulationH.HandleCancelScenePreviews)
+			}
+			r.Post("/{id}/imports", projectsH.HandleUploadImport)
+			r.Post("/{id}/imports/scan", projectsH.HandleScanImports)
+			r.Post("/{id}/imports/{import_id}/retry", projectsH.HandleRetryImport)
+			r.Post("/{id}/imports/{import_id}/install", projectsH.HandleInstallImport)
+			r.Post("/{id}/imports/{import_id}/cancel", projectsH.HandleCancelInstallation)
+			r.Get("/{id}/components", projectsH.HandleComponentVersions)
+			r.Post("/{id}/components/bind", projectsH.HandleBindComponents)
+			r.Post("/{id}/components/apply", projectsH.HandleApplyComponents)
+			r.Delete("/{id}/components/{component_id}", projectsH.HandleRemoveComponent)
+			r.Post("/{id}/components/rollback", projectsH.HandleRollbackComponents)
 			r.Patch("/{id}", projectsH.HandleUpdateProject)
 			r.Delete("/{id}", projectsH.HandleArchiveProject)
 			r.Post("/{id}/activate", projectsH.HandleActivateProject)
@@ -155,6 +159,7 @@ func NewRouter(logger *log.Logger, authSvc *auth.Service, chatH *handlers.ChatHa
 					r.Post("/runtime/release", simulationH.HandleReleaseProjectSimulation)
 					r.Get("/project-scenes", simulationH.HandleListProjectScenes)
 					r.Post("/project-scenes", simulationH.HandleAddProjectScene)
+					r.Delete("/project-scenes/{project_scene_id}", simulationH.HandleRemoveProjectScene)
 					r.Post("/project-scenes/{project_scene_id}/layout-drafts",
 						simulationH.HandleCreateProjectLayoutDraft)
 					r.Post("/project-scenes/{project_scene_id}/instances",
@@ -226,7 +231,7 @@ func NewRouter(logger *log.Logger, authSvc *auth.Service, chatH *handlers.ChatHa
 			r.Get("/{id}/workflows/{workflow_id}/view", projectsH.HandleGetWorkflowView)
 			// 用户批准前的修订只发生在 Conversation + Plan Proposal；Workflow
 			// 创建后只暴露运行控制，旧的直接 PATCH/feedback/confirm 入口下线。
-			r.Post("/{id}/workflows/{workflow_id}/{action:pause|resume|stop|retry-decision}",
+			r.Post("/{id}/workflows/{workflow_id}/{action:pause|resume|stop|retry-decision|confirm-stop}",
 				projectsH.HandleWorkflowAction)
 			r.Get("/{id}/maps/{map_id}", projectsH.HandleGetSemanticMap)
 			r.Post("/{id}/maps/{map_id}/query", projectsH.HandleQuerySemanticMap)

@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package store
 
 import (
@@ -63,6 +48,11 @@ var ErrDefaultProject = errors.New("Default Project 不能归档")
 
 // ErrInvalidState 表示状态值或状态迁移不属于当前实现允许的范围。
 var ErrInvalidState = errors.New("状态或状态迁移非法")
+
+// ErrOperatorConfirmationRequired 表示停止请求无法凭 Robot Execution 证据收敛：
+// 物理执行状态未知，普通 stop 会被安全策略退回 paused/execution_state_unknown。
+// 调用方必须引导用户走人工安全确认入口，不能把停止被回退当成成功。
+var ErrOperatorConfirmationRequired = errors.New("执行物理状态未知，必须人工确认现场安全")
 
 // ErrRobotReserved 表示非终态 Task、直接 Run 或物理执行已占用同一 Robot。它不是
 // 新的调度状态；Workflow 将其收敛为既有 waiting_resource 后等待设备事件。

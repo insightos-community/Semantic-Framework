@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package handlers
 
 import (
@@ -21,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -29,13 +13,15 @@ import (
 
 	"insightos.cn/semantic-framework/internal/server/auth"
 	"insightos.cn/semantic-framework/internal/store"
-	"insightos.cn/semantic-framework/pkg/config"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/log"
 )
 
 type fakeWorkflowApplication struct {
 	st      *store.Store
 	actions []string
+	// stopErr 让测试驱动应用服务返回特定错误，验证 HTTP 层的错误码映射。
+	stopErr error
 }
 
 func (f *fakeWorkflowApplication) ApprovePlanProposal(_ context.Context, _, projectID,
@@ -87,6 +73,10 @@ func (f *fakeWorkflowApplication) RetryRobotAgentDecision(_ context.Context, _, 
 
 func (f *fakeWorkflowApplication) StopWorkflow(_ context.Context, _, projectID, workflowID string,
 	revision int64) (store.WorkflowView, error) {
+	if f.stopErr != nil {
+		f.actions = append(f.actions, "stop")
+		return store.WorkflowView{}, f.stopErr
+	}
 	workflow, err := f.st.GetWorkflow(workflowID)
 	if err != nil {
 		return store.WorkflowView{}, err
@@ -131,14 +121,7 @@ func newV030HTTPTest(t *testing.T, withApplication bool) (*store.Store, *fakeWor
 	http.Handler, store.Project, store.ChatSession) {
 	t.Helper()
 	logger := log.New(log.Options{Level: log.LevelError, Writer: io.Discard})
-	st, err := store.Open(config.StoreConfig{Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db")}, logger)
-	if err != nil {
-		t.Fatalf("Open 失败: %v", err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate 失败: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	st := storetest.OpenMigrated(t, logger)
 	project, err := st.CreateProject("usr-v030-http", "v0.3 HTTP")
 	if err != nil {
 		t.Fatalf("创建 Project 失败: %v", err)
@@ -314,6 +297,35 @@ func TestV030WorkflowHTTPUsesApplicationAndProjectBoundary(t *testing.T) {
 		fmt.Sprintf(`{"revision":%d}`, revision))
 	if code != http.StatusConflict {
 		t.Fatalf("非活动 Project 的 Workflow 更新应为 409，实际 %d", code)
+	}
+}
+
+func TestV030StopWorkflowSurfacesOperatorConfirmationRequirement(t *testing.T) {
+	st, application, router, project, session := newV030HTTPTest(t, true)
+	ready, err := st.SubmitPlanProposal(project.ID, session.ID, store.WorkflowDraft{
+		Goal: "物理状态未知", Tasks: []store.TaskDraft{{
+			ID: "task-unknown-http", RequiredRole: "robot", Goal: "停止未知执行",
+		}},
+	}, "", nil, "# 物理状态未知", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := st.ApprovePlanProposal(ready.ID, ready.Revision, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 应用服务在"物理状态未知"时返回明确哨兵错误；HTTP 层必须把它映射成可分支
+	// 的错误码，前端才能打开人工安全确认，而不是把停止被回退当成成功。
+	application.stopErr = store.ErrOperatorConfirmationRequired
+	url := workflowURL(project.ID) + "/" + view.Workflow.ID + "/stop"
+	code, body := doJSON(t, router, http.MethodPost, url, "",
+		fmt.Sprintf(`{"revision":%d}`, view.Workflow.Revision))
+	if code != http.StatusConflict {
+		t.Fatalf("物理状态未知的停止应返回 409，实际 %d body=%+v", code, body)
+	}
+	errBody, _ := body["error"].(map[string]any)
+	if errBody["code"] != "OPERATOR_CONFIRMATION_REQUIRED" {
+		t.Fatalf("停止错误码必须可被前端分支识别: %+v", body)
 	}
 }
 

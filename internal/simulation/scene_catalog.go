@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -77,6 +62,10 @@ type SceneCatalogVersion struct {
 // SceneCatalogEntry 是跨 Project 的只读场景目录项。目录由安装包、资产仓、导入包
 // 或 Project 发布动作更新；浏览目录不要求 Runtime 在线。
 type SceneCatalogEntry struct {
+	PreviewPreparation *ScenePreviewStatus `yaml:"-" json:"preview_preparation,omitempty"`
+	// ContentRoot 是场景包内的数据目录；加载目录时解析为绝对路径，仅传给 Runtime。
+	// Framework 不解释其中的 BDDL、初态或引擎资产。
+	ContentRoot              string                `yaml:"content_root,omitempty" json:"-"`
 	SceneID                  string                `yaml:"scene_id" json:"scene_id"`
 	Name                     string                `yaml:"name" json:"name"`
 	Description              string                `yaml:"description" json:"description,omitempty"`
@@ -97,6 +86,7 @@ type sceneCatalogFile struct {
 
 // SceneCatalogService 在内存中维护启动期严格加载的只读索引。
 type SceneCatalogService struct {
+	directory          string
 	mu                 sync.RWMutex
 	version            string
 	items              map[string]SceneCatalogEntry
@@ -105,10 +95,13 @@ type SceneCatalogService struct {
 }
 
 func LoadSceneCatalog(dir string) (*SceneCatalogService, error) {
-	service := &SceneCatalogService{items: map[string]SceneCatalogEntry{}, authoringDocuments: map[string]SceneDocument{}}
+	service := &SceneCatalogService{directory: dir, items: map[string]SceneCatalogEntry{}, authoringDocuments: map[string]SceneDocument{}}
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if entry.IsDir() && path != dir && strings.HasPrefix(entry.Name(), ".") {
+			return filepath.SkipDir
 		}
 		if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yaml" && filepath.Ext(entry.Name()) != ".yml") {
 			return nil
@@ -130,6 +123,9 @@ func LoadSceneCatalog(dir string) (*SceneCatalogService, error) {
 			service.version = file.CatalogVersion
 		}
 		for _, item := range file.Entries {
+			if err := resolveSceneContent(filepath.Dir(path), &item); err != nil {
+				return err
+			}
 			if validationErr := validateSceneCatalogEntry(item); validationErr != nil {
 				return fmt.Errorf("场景目录 %s 无效: %w", path, validationErr)
 			}
@@ -156,6 +152,61 @@ func LoadSceneCatalog(dir string) (*SceneCatalogService, error) {
 		service.version = "empty"
 	}
 	return service, nil
+}
+
+func resolveSceneContent(root string, item *SceneCatalogEntry) error {
+	if item.ContentRoot == "" {
+		return nil
+	}
+	if err := validateRuntimePackRelativePath(item.ContentRoot); err != nil {
+		return err
+	}
+	base, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	// root 自身可能含符号链接（macOS 的 /var、被链接的安装根）。先规范化 base，
+	// 否则与 EvalSymlinks 后的 resolved 比较会在 Rel 处误判为越界。
+	if evaluated, evalErr := filepath.EvalSymlinks(base); evalErr == nil {
+		base = evaluated
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(base, item.ContentRoot))
+	if err != nil {
+		return fmt.Errorf("场景内容未安装: %w", err)
+	}
+	rel, err := filepath.Rel(base, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errors.New("场景内容必须位于目录包内")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
+		return errors.New("场景内容必须是目录")
+	}
+	item.ContentRoot = resolved
+	return nil
+}
+
+func (s *SceneCatalogService) contentRoot(profileID, sceneKey string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	root := ""
+	for _, item := range s.items {
+		if item.CompatibleRuntimeProfile != profileID {
+			continue
+		}
+		for _, version := range item.Versions {
+			if version.RuntimeSceneKey != sceneKey {
+				continue
+			}
+			if root != "" && item.ContentRoot != "" && root != item.ContentRoot {
+				return "", errors.New("场景内容来源重复，请保留一个已安装版本")
+			}
+			if item.ContentRoot != "" {
+				root = item.ContentRoot
+			}
+		}
+	}
+	return root, nil
 }
 
 // LoadSceneCatalogFS 从编译期内置模板读取离线场景目录。它只在未运行

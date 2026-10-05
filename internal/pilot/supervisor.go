@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
@@ -29,6 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 )
+
+// Complete joint trajectories are carried in a single JSON-RPC line.
+const maxWorkerMessageBytes = 8 * 1024 * 1024
 
 type rpcMessage struct {
 	JSONRPC string         `json:"jsonrpc"`
@@ -55,6 +43,9 @@ type WorkerSupervisor struct {
 type WorkerProcess struct {
 	command *exec.Cmd
 	stdin   io.WriteCloser
+	// Captured once from the installed Python input_model before Start returns.
+	// This is not synthesized from documentation or examples.
+	inputSchema map[string]any
 
 	writeMu   sync.Mutex
 	pendingMu sync.Mutex
@@ -130,7 +121,7 @@ func (s WorkerSupervisor) Start(ctx context.Context, definition SkillDefinition)
 			return nil, fmt.Errorf("worker first message is %q, expected ready", message.Method)
 		}
 		process.markRequestHandled(message.requestSequence)
-		_, initErr := process.Call(ctx, "worker.initialize", map[string]any{
+		initialized, initErr := process.Call(ctx, "worker.initialize", map[string]any{
 			"name":    definition.Name,
 			"version": definition.Version,
 			"runtime": map[string]any{
@@ -146,6 +137,9 @@ func (s WorkerSupervisor) Start(ctx context.Context, definition SkillDefinition)
 		if initErr != nil {
 			_ = process.Kill()
 			return nil, fmt.Errorf("initialize worker: %w", initErr)
+		}
+		if result, ok := initialized.(map[string]any); ok {
+			process.inputSchema, _ = result["input_schema"].(map[string]any)
 		}
 		return process, nil
 	case <-process.done:
@@ -288,7 +282,7 @@ func (p *WorkerProcess) write(message rpcMessage) error {
 
 func (p *WorkerProcess) readStdout(reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxWorkerMessageBytes)
 	for scanner.Scan() {
 		var message rpcMessage
 		if err := json.Unmarshal(scanner.Bytes(), &message); err != nil || message.JSONRPC != "2.0" {

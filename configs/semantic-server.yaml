@@ -3,6 +3,7 @@
 # 端口以 docs/ports-and-services.md 为准；密钥类配置只从环境变量读取，禁止写入本文件。
 # 环境变量覆盖约定：前缀 SEMANTIC_，嵌套字段以 _ 分隔，如 SEMANTIC_SERVER_HTTP_ADDR。
 server:
+  access_token_ttl: 24h     # 用户登录令牌有效期，例如 720h 为 30 天
   http_addr: ":8080"        # HTTP 服务监听地址
   ws_addr: ":8081"          # WebSocket 服务监听地址
   read_timeout: 10s         # HTTP 请求读取超时
@@ -58,6 +59,11 @@ robot_runtime:
   server_websocket_url: ws://127.0.0.1:8081/ws/pilot
   ability_port_first: 18100
   ability_port_last: 18199
+  # 受管 Robot 就绪上限。不写 = 2 分钟内置默认值；写了会覆盖 Bundle 自带的
+  # spec.runtime.readinessTimeout。冷启动加载大模型（如 Franka SmolVLA 走
+  # CPU 推理）可放宽，例如 8m。
+  # env 覆盖：SEMANTIC_ROBOT_RUNTIME_READINESS_TIMEOUT=8m
+  # readiness_timeout: 8m
 
 
 # MCP server 连接清单（docs/architecture/16 §3）。R16 mcpregistry 消费本段：

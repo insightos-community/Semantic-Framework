@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package runtime
 
 import (
@@ -195,8 +180,8 @@ func TestConversationSettingsRejectBusyDuringFirstRecipientBuild(t *testing.T) {
 			}()
 			select {
 			case <-started:
-			case <-time.After(3 * time.Second):
-				t.Fatal("首轮装配未开始")
+			case <-time.After(runtimeEventWait):
+				t.Fatalf("首轮装配未在 %s 内开始", runtimeEventWait)
 			}
 			if _, err := svc.SetSessionAgentModel("busy-user", sess.ID, recipient, "mock", "auto"); !errors.Is(err, ErrSessionBusy) {
 				t.Fatalf("首次装配尚无 Runner 也必须拒绝模型切换: %v", err)
@@ -244,8 +229,8 @@ func TestConversationCacheInvalidationDuringBuildRetainsSessionLock(t *testing.T
 	}()
 	select {
 	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("首轮装配未开始")
+	case <-time.After(runtimeEventWait):
+		t.Fatalf("首轮装配未在 %s 内开始", runtimeEventWait)
 	}
 	svc.InvalidateModelRuntimes()
 	if svc.sessionLock(sess.ID) != gate {

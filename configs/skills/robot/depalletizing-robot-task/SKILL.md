@@ -27,6 +27,10 @@ Robot SDK。只能选择当前 Robot 已安装并启用的精确 Robot Skill 版
 ## 状态边界
 
 - SubTask 依赖表示执行顺序，不表示通过 JSON 搬运物理状态。
+- intent 不得写入 `carrying_object`、`held_object` 或 `holding_object`，包括
+  布尔值和 null。空载或携物属于执行期状态，写入 `completion_criteria`；Skill
+  通过 RobotState Ability 实时读取。`carried_object_ref` 只表示要搬运的对象
+  身份，可以保留。
 - Task input 中对象或目标列的 `name/object_ref/target_ref` 是 Robot Skill
   重新观测时使用的业务身份；Map `entity_id/region_id` 只说明本次规划选择了哪条
   地图记录。生成 intent 和可执行输入时必须保留业务身份，不能把 Map ID 改写成

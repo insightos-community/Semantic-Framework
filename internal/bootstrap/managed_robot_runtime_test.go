@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package bootstrap
 
 import (
@@ -33,7 +18,7 @@ import (
 	"insightos.cn/semantic-framework/internal/robotruntime"
 	"insightos.cn/semantic-framework/internal/simulation"
 	"insightos.cn/semantic-framework/internal/store"
-	"insightos.cn/semantic-framework/pkg/config"
+	"insightos.cn/semantic-framework/internal/store/storetest"
 	"insightos.cn/semantic-framework/pkg/log"
 )
 
@@ -135,16 +120,7 @@ func TestManagedRobotShutdownConvergesExecutionOnlyWithSafeEvidence(t *testing.T
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			logger := log.New(log.Options{Level: log.LevelError, Writer: io.Discard})
-			st, err := store.Open(config.StoreConfig{
-				Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "shutdown.db"),
-			}, logger)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer st.Close()
-			if err := st.Migrate(); err != nil {
-				t.Fatal(err)
-			}
+			st := storetest.OpenMigrated(t, logger)
 			project, err := st.CreateProject("user-shutdown", "shutdown")
 			if err != nil {
 				t.Fatal(err)
@@ -211,16 +187,7 @@ func TestManagedRobotShutdownConvergesExecutionOnlyWithSafeEvidence(t *testing.T
 func TestMissingStateJSONBlocksReclaimUntilGoneIsTreatedClean(t *testing.T) {
 	ctx := context.Background()
 	logger := log.New(log.Options{Level: log.LevelError, Writer: io.Discard})
-	st, err := store.Open(config.StoreConfig{
-		Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "reclaim.db"),
-	}, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if err := st.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	st := storetest.OpenMigrated(t, logger)
 
 	dataRoot := t.TempDir()
 	instanceID := "robot-9fa5b90d-333c-4707-99c6-04b46b7a3042-r1_pro_tote_gripper-1"
@@ -463,6 +430,48 @@ func TestWithInstanceTempDirOverridesExistingTMPDIR(t *testing.T) {
 	}
 	if len(tmpdirs) != 1 || tmpdirs[0] != "TMPDIR="+want {
 		t.Fatalf("TMPDIR 应只保留实例目录旁一条: %#v", tmpdirs)
+	}
+}
+
+func TestCPUWaitPolicyEnvStopsSpinWaitingForManagedShapes(t *testing.T) {
+	// 无独显主机上推理在 CPU 上跑；空闲线程自旋会与同机仿真抢 CPU，同机重载下
+	// 交错复测三次约 3 倍差距（10 线程 21.3s 对 7.7s），因此必须在拉起受管
+	// 实例时就注入，而不是等 torch 初始化后再设。
+	env := cpuWaitPolicyEnv([]string{"PATH=/usr/bin", "HOME=/home/dev"})
+	want := map[string]bool{"KMP_BLOCKTIME=0": false, "OMP_WAIT_POLICY=PASSIVE": false}
+	for _, item := range env {
+		if _, ok := want[item]; ok {
+			want[item] = true
+		}
+	}
+	for key, found := range want {
+		if !found {
+			t.Fatalf("受管进程环境应包含 %s: %#v", key, env)
+		}
+	}
+	if len(env) != 4 {
+		t.Fatalf("应保留基础环境并追加两条等待策略: %#v", env)
+	}
+}
+
+func TestCPUWaitPolicyEnvKeepsOperatorOverrides(t *testing.T) {
+	// 现场排障可能显式指定等待策略，注入不能覆盖运维意图，也不能留下两条同名列。
+	env := cpuWaitPolicyEnv([]string{"KMP_BLOCKTIME=200", "OMP_WAIT_POLICY=active", "PATH=/usr/bin"})
+	counts := map[string]int{}
+	for _, item := range env {
+		name, value, _ := strings.Cut(item, "=")
+		counts[name]++
+		if name == "KMP_BLOCKTIME" && value != "200" {
+			t.Fatalf("KMP_BLOCKTIME 应保留运维值 200: %#v", env)
+		}
+		if name == "OMP_WAIT_POLICY" && value != "active" {
+			t.Fatalf("OMP_WAIT_POLICY 应保留运维值 active: %#v", env)
+		}
+	}
+	for _, name := range []string{"KMP_BLOCKTIME", "OMP_WAIT_POLICY", "PATH"} {
+		if counts[name] != 1 {
+			t.Fatalf("%s 应恰好出现一次: %#v", name, env)
+		}
 	}
 }
 

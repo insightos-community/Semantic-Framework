@@ -1,24 +1,10 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package builtin
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -113,6 +99,11 @@ func (t *robotGetTool) Run(ctx context.Context, raw string) (string, error) {
 			contract["input_model"], _ = runtimeSpec["input_model"].(string)
 			contract["result_model"], _ = runtimeSpec["result_model"].(string)
 		}
+		inputSchema, err := t.service.DescribeSkillInput(ctx, scope.RobotID, detail.Name, detail.Version)
+		if err != nil {
+			return "", robotToolError(err)
+		}
+		contract["input_schema"] = inputSchema
 		result["skill_contract"] = contract
 	}
 	if run, err := t.service.Store().GetRobotConversationRun(scope.RobotID); err == nil && run.ProjectID == scope.ProjectID {
@@ -204,7 +195,7 @@ type robotRunArgs struct {
 type robotRunTool struct{ service *robotdomain.Service }
 
 func (t *robotRunTool) Def() tool.Definition {
-	return tool.Definition{Name: "robot.run", Namespace: "robot", Description: "在当前 Robot 上调用一个已安装 Skill；使用准确 skill_version 与契约字段，缺少契约时先 robot.get(skill_name)。Task 返回 Execution ID；直接请求等待该执行结束或需要处理的状态，再依据实际结果选择后续技能。忙碌时不会排队，不得重放旧参数。", ParametersJSON: `{"type":"object","properties":{"skill_name":{"type":"string"},"skill_version":{"type":"string"},"input":{"type":"object"}},"required":["skill_name","skill_version","input"],"additionalProperties":false}`, Annotations: tool.Annotations{Risk: tool.RiskHigh, Timeout: 15 * time.Minute}}
+	return tool.Definition{Name: "robot.run", Namespace: "robot", Description: "在当前 Robot 上启动一个已安装 Skill；使用准确 skill_version 与契约字段，缺少契约时先 robot.get(skill_name)。受理后立即返回 Execution ID 并结束本轮请求，实际进度和结果由执行面板展示；accepted 不代表任务成功。不得轮询或再次调用以重放参数。", ParametersJSON: `{"type":"object","properties":{"skill_name":{"type":"string"},"skill_version":{"type":"string"},"input":{"type":"object"}},"required":["skill_name","skill_version","input"],"additionalProperties":false}`, Annotations: tool.Annotations{Risk: tool.RiskHigh, Timeout: 15 * time.Minute}}
 }
 func (t *robotRunTool) Run(ctx context.Context, raw string) (string, error) {
 	var args robotRunArgs
@@ -239,22 +230,15 @@ func (t *robotRunTool) Run(ctx context.Context, raw string) (string, error) {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		return "", robotToolError(err)
-	}
-	if direct {
-		execution, err = t.service.WaitDirectExecution(ctx, execution)
-		if err != nil {
-			if ctx.Err() != nil {
-				return "", ctx.Err()
+		if errors.Is(err, robotdomain.ErrRobotBusy) {
+			// 拒绝的是新请求，原执行继续持有机器人。返回原执行身份，避免
+			// Agent 把冲突理解为旧任务已失败，再次调用 robot.run 或停止错对象。
+			if pilot, loadErr := t.service.Store().GetActiveRobotPilot(scope.RobotID); loadErr == nil && pilot.CurrentExecutionID != "" {
+				return "", &tool.Error{Code: "ROBOT_BUSY", Message: fmt.Sprintf(
+					"Robot 正由执行 %s 占用，本次请求未启动。请查看原执行；需要更换任务时，先停止该执行并等待停止确认，不要自动重试 robot.run。", pilot.CurrentExecutionID)}
 			}
-			return "", robotToolError(err)
 		}
-		result := map[string]any{"accepted": true, "execution_id": execution.ID,
-			"status": execution.Status, "execution": execution}
-		if execution.Status == "waiting_agent" {
-			result["requires_attention"] = "该 Execution 正等待处理。请查看执行详情或安全停止；不要重新调用 Skill 重放旧参数。"
-		}
-		return tool.OKResult(result)
+		return "", robotToolError(err)
 	}
 	return tool.OKResult(map[string]any{"accepted": true, "execution_id": execution.ID, "status": execution.Status})
 }
@@ -320,6 +304,10 @@ func robotToolError(err error) *tool.Error {
 		code = "ROBOT_SKILL_VERSION_REQUIRED"
 	case errors.Is(err, robotdomain.ErrRequestConflict):
 		code = "ROBOT_REQUEST_CONFLICT"
+	case errors.Is(err, robotdomain.ErrSkillInputInvalid):
+		// A model may correct these arguments. This must not be confused with
+		// an Action failure, nor marked retryable for blind execution replay.
+		code = "ROBOT_SKILL_INPUT_INVALID"
 	case errors.Is(err, robotdomain.ErrSkillOutsideTask):
 		code = "ROBOT_SKILL_OUTSIDE_APPROVED_SCOPE"
 	case errors.Is(err, robotdomain.ErrDirectRunScope):

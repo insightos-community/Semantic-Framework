@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -24,11 +9,7 @@ import (
 )
 
 const (
-	// 原生 MuJoCo 首次解析多箱场景和编译渲染资源时可能超过一分钟。
-	// HTTP 启动请求已经返回 starting，真正负责后续 Map 首次同步和受管 Robot
-	// 拉起的是这个观察协程；观察窗口短于 Robot 启动窗口会造成“场景稍后可用，
-	// 但 Robot 永远不再启动”的断链。这里与受管实例外层启动窗口统一为三分钟，
-	// 只延长对同一 instance/generation 的观察，不重试或重放任何物理命令。
+	// 未声明场景加载预算的 Profile 保持现有三分钟默认值。
 	catalogStartObserveTimeout = 3 * time.Minute
 	catalogStartPollInterval   = 100 * time.Millisecond
 )
@@ -220,7 +201,10 @@ func (s *Service) StartCatalogScene(
 // Robot 命令。请求 Context 在 HTTP 返回后会取消，因此这里使用有上限的独立
 // Context；Project 退出、实例停止、generation 变化或 Runtime 失败都会终止观察。
 func (s *Service) observeCatalogSceneStart(projectID string, started SceneInstance) {
-	ctx, cancel := context.WithTimeout(context.Background(), catalogStartObserveTimeout)
+	profile, _ := s.runtimeProfile(started.RuntimeProfileID)
+	// 场景加载与 Robot/模型启动是不同阶段。大型原生场景可以声明更长的
+	// 加载预算，避免场景正常就绪后，负责地图和 Robot 拉起的观察器早已退出。
+	ctx, cancel := context.WithTimeout(context.Background(), catalogSceneStartTimeout(profile))
 	defer cancel()
 	ticker := time.NewTicker(catalogStartPollInterval)
 	defer ticker.Stop()
@@ -255,6 +239,13 @@ func (s *Service) observeCatalogSceneStart(projectID string, started SceneInstan
 		case <-ticker.C:
 		}
 	}
+}
+
+func catalogSceneStartTimeout(profile RuntimeProfile) time.Duration {
+	if profile.SceneStartTimeoutSeconds > 0 {
+		return time.Duration(profile.SceneStartTimeoutSeconds) * time.Second
+	}
+	return catalogStartObserveTimeout
 }
 
 func (s *Service) syncSceneCheckpoint(
@@ -294,6 +285,15 @@ func (s *Service) SwitchCatalogVariant(
 	}
 	if state.CatalogSceneID == "" || state.SceneVersion == "" {
 		return SceneInstance{}, fmt.Errorf("%w: 当前实例不是从 Project 场景引用启动", ErrConflict)
+	}
+	instance, err := s.Scene(ctx, projectID, instanceID)
+	if err != nil {
+		return SceneInstance{}, err
+	}
+	// Layout 切换会读取地图检查点并停止旧场景，必须等原生加载完成。
+	// 在访问引擎数据前拒绝重复操作，CLI/API 与 Web 使用同一状态约束。
+	if instance.State != "running" && instance.State != "paused" {
+		return SceneInstance{}, fmt.Errorf("%w: 场景当前为 %s，请等待就绪后切换 Layout", ErrConflict, instance.State)
 	}
 	if _, _, _, err := s.ValidateProjectCatalogScene(projectID,
 		state.CatalogSceneID, state.SceneVersion, variantID); err != nil {

@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package pilot
 
 import (
@@ -184,8 +169,14 @@ func (c *RemoteClient) runConnection(ctx context.Context) error {
 		if err := json.Unmarshal(data, &command); err != nil {
 			return err
 		}
-		if command.Type == "skill.validate_input" {
-			result, validateErr := c.validateSkillInput(ctx, command.Payload)
+		if command.Type == "skill.validate_input" || command.Type == "skill.describe_input" {
+			var result map[string]any
+			var validateErr error
+			if command.Type == "skill.describe_input" {
+				result, validateErr = c.describeSkillInput(ctx, command.Payload)
+			} else {
+				result, validateErr = c.validateSkillInput(ctx, command.Payload)
+			}
 			if validateErr != nil {
 				_ = c.write(map[string]any{"type": "command.ack", "command_id": command.CommandID,
 					"ok": false, "error": validateErr.Error()})
@@ -201,6 +192,20 @@ func (c *RemoteClient) runConnection(ctx context.Context) error {
 		}
 		_ = c.write(map[string]any{"type": "command.ack", "command_id": command.CommandID, "ok": true})
 	}
+}
+
+func (c *RemoteClient) describeSkillInput(ctx context.Context, raw json.RawMessage) (map[string]any, error) {
+	var payload struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	if payload.Name == "" || payload.Version == "" {
+		return nil, errors.New("skill.describe_input requires exact name and version")
+	}
+	return c.runtime.DescribeInput(ctx, payload.Name, payload.Version)
 }
 
 func (c *RemoteClient) validateSkillInput(ctx context.Context,

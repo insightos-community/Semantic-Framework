@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -60,6 +45,7 @@ type RuntimeContentRequirement struct {
 // Pack 只携带 Wheel、锁文件和元数据；运行命令由 Framework 根据 Runner 生成，
 // 因此制品不能通过 manifest 注入任意 Shell 或 Python 入口。
 type RuntimePackManifest struct {
+	Settings             *RuntimePackFile                     `yaml:"settings,omitempty" json:"settings,omitempty"`
 	SchemaVersion        int                                  `yaml:"schema_version" json:"schema_version"`
 	PackID               string                               `yaml:"pack_id" json:"pack_id"`
 	PackVersion          string                               `yaml:"pack_version" json:"pack_version"`
@@ -104,6 +90,10 @@ func LoadRuntimePack(root string) (RuntimePackManifest, error) {
 		if err := verifyRuntimePackFile(root, file); err != nil {
 			return RuntimePackManifest{}, err
 		}
+	}
+	// 新 Runtime 独立安装，只验证服务就绪；保留旧包显式声明的场景检查。
+	if manifest.SmokeRequest.Path == "" {
+		return manifest, nil
 	}
 	smokeData, err := os.ReadFile(filepath.Join(
 		root, filepath.FromSlash(manifest.SmokeRequest.Path),
@@ -150,9 +140,14 @@ func (m RuntimePackManifest) Validate() error {
 	}
 	if len(m.Wheels) == 0 || len(m.Wheelhouse) == 0 || len(m.Licenses) == 0 ||
 		len(m.VerificationFiles) == 0 ||
-		m.RequirementsLock.Path == "" || m.SceneCatalog.Path == "" || m.SmokeSceneKey == "" ||
-		m.SmokeRequest.Path == "" {
-		return errors.New("Pack 必须包含 wheels、wheelhouse、依赖锁、场景目录、许可证和 smoke_scene_key")
+		m.RequirementsLock.Path == "" {
+		return errors.New("Pack 必须包含 wheels、wheelhouse、依赖锁、许可证和版本记录")
+	}
+	if (m.SmokeSceneKey == "") != (m.SmokeRequest.Path == "") {
+		return errors.New("旧包的 smoke_scene_key 与 smoke_request 必须同时提供")
+	}
+	if m.SceneCatalog.Path == "" && len(m.SceneResources) > 0 {
+		return errors.New("scene_resources 需要对应的 scene_catalog")
 	}
 	seen := map[string]bool{}
 	for _, file := range m.Files() {
@@ -183,7 +178,15 @@ func (m RuntimePackManifest) Validate() error {
 }
 
 func (m RuntimePackManifest) Files() []RuntimePackFile {
-	result := []RuntimePackFile{m.RequirementsLock, m.SceneCatalog, m.SmokeRequest}
+	result := []RuntimePackFile{m.RequirementsLock}
+	for _, optional := range []RuntimePackFile{m.SceneCatalog, m.SmokeRequest} {
+		if optional.Path != "" {
+			result = append(result, optional)
+		}
+	}
+	if m.Settings != nil {
+		result = append(result, *m.Settings)
+	}
 	result = append(result, m.Wheels...)
 	result = append(result, m.Wheelhouse...)
 	result = append(result, m.SceneResources...)
@@ -235,6 +238,8 @@ func RuntimeRunnerExecutable(environmentPath, runner string) (string, error) {
 		name = "plugin-mujoco"
 	case "robosuite-1.5", "libero-robosuite-1.4":
 		name = "semantic-sim-runtime"
+	case "behavior-omnigibson":
+		name = "semantic-isaac-runtime"
 	default:
 		return "", fmt.Errorf("Runtime runner %q 不受支持", runner)
 	}
@@ -248,6 +253,7 @@ func runtimeContentEnvironmentName(key string) (string, error) {
 		"franka_model":      "FRANKA_MODEL_ROOT",
 		"libero_source":     "SEMANTIC_LIBERO_ROOT",
 		"libero_pro_source": "SEMANTIC_LIBERO_PRO_ROOT",
+		"behavior_data":     "OMNIGIBSON_DATA_PATH",
 	}
 	name, ok := known[key]
 	if !ok {

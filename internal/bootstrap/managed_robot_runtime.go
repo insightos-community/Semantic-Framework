@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package bootstrap
 
 import (
@@ -31,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"insightos.cn/semantic-framework/internal/install"
 	robotdomain "insightos.cn/semantic-framework/internal/robot"
 	"insightos.cn/semantic-framework/internal/robotruntime"
 	"insightos.cn/semantic-framework/internal/simulation"
@@ -50,8 +36,9 @@ type robotInstanceConfig struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Spec struct {
-		Bundle string `yaml:"bundle"`
-		Robot  struct {
+		Bundle                string `yaml:"bundle"`
+		ComponentBindingsFile string `yaml:"componentBindingsFile,omitempty"`
+		Robot                 struct {
 			ID                 string         `yaml:"id"`
 			DisplayName        string         `yaml:"displayName"`
 			Model              string         `yaml:"model"`
@@ -119,10 +106,15 @@ type managedRobotInstanceLauncher struct {
 	store  *store.Store
 	logger *log.Logger
 
-	serverHTTP string
-	serverWS   string
-	readiness  time.Duration
-	shutdown   time.Duration
+	serverHTTP       string
+	serverWS         string
+	readiness        time.Duration
+	shutdown         time.Duration
+	installationRoot string
+
+	// readinessOverride 来自 Server 配置或环境变量。非零时优先于
+	// bundle.yaml 的 spec.runtime.readinessTimeout；两者都没有才用内置默认值。
+	readinessOverride time.Duration
 
 	mu        sync.Mutex
 	processes map[string]*managedRobotProcess
@@ -136,11 +128,13 @@ func newManagedRobotInstanceLauncher(
 ) *managedRobotInstanceLauncher {
 	return &managedRobotInstanceLauncher{
 		robots: robots, store: st, logger: logger,
-		serverHTTP: strings.TrimRight(cfg.ServerHTTP, "/"),
-		serverWS:   strings.TrimRight(cfg.ServerWS, "/"),
-		readiness:  managedRobotReadinessTimeout,
-		shutdown:   managedRobotShutdownTimeout,
-		processes:  make(map[string]*managedRobotProcess),
+		serverHTTP:        strings.TrimRight(cfg.ServerHTTP, "/"),
+		serverWS:          strings.TrimRight(cfg.ServerWS, "/"),
+		readiness:         managedRobotReadinessTimeout,
+		shutdown:          managedRobotShutdownTimeout,
+		readinessOverride: time.Duration(cfg.ReadinessTimeout),
+		installationRoot:  filepath.Join(cfg.DataRoot, "installations"),
+		processes:         make(map[string]*managedRobotProcess),
 	}
 }
 
@@ -172,7 +166,7 @@ func (l *managedRobotInstanceLauncher) Start(
 		_ = logFile.Close()
 		return robotruntime.LaunchResult{}, envErr
 	}
-	command.Env = env
+	command.Env = cpuWaitPolicyEnv(env)
 	tree, err := processport.Start(command)
 	if err != nil {
 		_ = logFile.Close()
@@ -190,7 +184,16 @@ func (l *managedRobotInstanceLauncher) Start(
 		close(process.done)
 	}()
 
-	waitCtx, cancel := context.WithTimeout(ctx, l.readiness)
+	readiness := l.resolveReadiness(request.Bundle)
+	if readiness != l.readiness {
+		l.logger.Info("已覆盖 Robot 就绪超时",
+			"bundle", request.Bundle.Name,
+			"version", request.Bundle.Version,
+			"readiness_timeout", readiness.String(),
+			"default", l.readiness.String(),
+		)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, readiness)
 	defer cancel()
 	if err := l.waitReady(waitCtx, request.Instance, process); err != nil {
 		return robotruntime.LaunchResult{}, err
@@ -200,6 +203,21 @@ func (l *managedRobotInstanceLauncher) Start(
 			"http://127.0.0.1:%d", request.Instance.AbilityFrameworkPort,
 		),
 	}, nil
+}
+
+// resolveReadiness 按固定优先级决定等待受管 Robot 就绪的上限：
+// 显式配置（Server 配置或 SEMANTIC_ROBOT_RUNTIME_READINESS_TIMEOUT）优先并精确生效，
+// 否则取内置默认值与 bundle.yaml 的 spec.runtime.readinessTimeout 中较大者。
+// 取较大者是因为这个值只决定"最多等多久"：包声明更长的收敛时间时必须放宽，
+// 而包声明的值比默认值短时不应把原本能起来的 Robot 判成超时。
+func (l *managedRobotInstanceLauncher) resolveReadiness(bundle robotruntime.Bundle) time.Duration {
+	if l.readinessOverride > 0 {
+		return l.readinessOverride
+	}
+	if bundle.ReadinessTimeout > l.readiness {
+		return bundle.ReadinessTimeout
+	}
+	return l.readiness
 }
 
 func (l *managedRobotInstanceLauncher) ensureRendered(
@@ -259,6 +277,12 @@ func (l *managedRobotInstanceLauncher) writeInstanceConfig(
 	document.Kind = "RobotInstance"
 	document.Metadata.Name = request.Instance.InstanceID
 	document.Spec.Bundle = request.Bundle.Path
+	components := &install.ComponentStore{Root: l.installationRoot}
+	bindingPath, err := components.EnsureRobotBinding(request.Instance.ProjectID, request.Instance.RobotID, request.Descriptor.Model)
+	if err != nil {
+		return "", err
+	}
+	document.Spec.ComponentBindingsFile = bindingPath
 	robot := &document.Spec.Robot
 	robot.ID = request.Descriptor.RobotID
 	robot.DisplayName = request.Descriptor.RobotID
@@ -507,13 +531,43 @@ func withInstanceTempDir(baseEnv []string, dataDirectory string) ([]string, erro
 	return append(env, "TMPDIR="+tmpDir), nil
 }
 
+// cpuWaitPolicyEnv 让受管进程树里的 OpenMP/oneDNN 空闲线程让出 CPU，而不是自旋抢占。
+//
+// 无独显主机上 SmolVLA 推理跑在 CPU 上，空闲线程自旋等待期间会与同机的 MuJoCo
+// 仿真、渲染互相抢 CPU。这是 CPU 推理上效果最大的单条杠杆：同机重载下交错复测
+// 三次，10 线程时自旋 21.3/21.4/21.9s，改被动等待后 7.7/7.7/7.9s（约 3 倍）。
+// 这类变量必须在 torch 的 OpenMP 运行时初始化之前生效，进程内设置已偏晚，因此在
+// 拉起受管实例时就注入，由其继承给 Pilot / AbilityFramework / Ability 子进程。
+// 对独显主机无害，故无条件设置；已显式设置的运维值优先，不被覆盖。
+func cpuWaitPolicyEnv(baseEnv []string) []string {
+	defaults := map[string]string{
+		"KMP_BLOCKTIME":   "0",
+		"OMP_WAIT_POLICY": "PASSIVE",
+	}
+	present := make(map[string]bool, len(defaults))
+	env := make([]string, 0, len(baseEnv)+len(defaults))
+	for _, item := range baseEnv {
+		name, _, found := strings.Cut(item, "=")
+		if found && defaults[name] != "" {
+			present[name] = true // 运维已显式设置，保留其值
+		}
+		env = append(env, item)
+	}
+	for _, name := range []string{"KMP_BLOCKTIME", "OMP_WAIT_POLICY"} {
+		if !present[name] {
+			env = append(env, name+"="+defaults[name])
+		}
+	}
+	return env
+}
+
 func (l *managedRobotInstanceLauncher) ReclaimInterruptedSimulation(
 	ctx context.Context,
 	instance robotruntime.RuntimeInstance,
 	reason string,
 ) (robotruntime.StopEvidence, error) {
-	if instance.Status != robotruntime.StateInterrupted || instance.Backend != "mujoco" {
-		return robotruntime.StopEvidence{}, errors.New("仅允许回收 interrupted 的本机 MuJoCo 实例")
+	if instance.Status != robotruntime.StateInterrupted || (instance.Backend != "mujoco" && instance.Backend != "isaac") {
+		return robotruntime.StopEvidence{}, errors.New("仅允许回收 interrupted 的本机受管仿真实例")
 	}
 	if gone, goneEvidence := managedInstanceAlreadyGone(instance.DataDirectory, reason); gone {
 		l.forgetManagedProcess(instance.InstanceID)
@@ -752,7 +806,7 @@ func (l *managedSceneRobotLifecycle) prepareSceneRobotStart(
 			"同一场景的 Robot Runtime %s 仍处于 %s，请先停止场景后重试",
 			existing.InstanceID, existing.Status)
 	}
-	if existing.Backend != "mujoco" {
+	if existing.Backend != "mujoco" && existing.Backend != "isaac" {
 		return false, fmt.Errorf("Robot 已被非受管仿真实例 %s 占用", existing.InstanceID)
 	}
 
@@ -844,13 +898,13 @@ func (l *managedSceneRobotLifecycle) StopSceneRobots(
 		}
 		stopped, stopErr := l.orchestrator.Stop(ctx, instance.InstanceID, reason)
 		if stopErr != nil {
-			if stopped.Status != robotruntime.StateInterrupted || stopped.Backend != "mujoco" {
+			if stopped.Status != robotruntime.StateInterrupted || (stopped.Backend != "mujoco" && stopped.Backend != "isaac") {
 				result = append(result, fmt.Errorf("%s: %w", instance.RobotID, stopErr))
 				continue
 			}
 			// SimulationService 在进入这里前已经从同一个 Scene Runtime 同步
 			// 取得 hold 成功。若 Pilot 已失联，supervisor 会按通用安全规则
-			// 保留 Ability/AF 并返回 interrupted；对受管 MuJoCo 场景可以用
+			// 保留 Ability/AF 并返回 interrupted；对受管 MuJoCo/Isaac 场景可以用
 			// 这份物理证据回收孤儿进程。真机不会进入该分支。
 			stopped, stopErr = l.orchestrator.ReclaimInterruptedSimulation(
 				ctx, stopped.InstanceID, stopped.SceneInstanceID, true,

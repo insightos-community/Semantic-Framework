@@ -1,18 +1,3 @@
-// Copyright 2026 InsightOS
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package simulation
 
 import (
@@ -59,15 +44,20 @@ type RuntimeClient interface {
 
 // HTTPRuntimeClient 通过 Plugin HTTP 接口管理场景、视觉内容和受限 Robot 调试操作。
 type HTTPRuntimeClient struct {
-	endpoint string
-	client   *http.Client
+	endpoint        string
+	client          *http.Client
+	lifecycleClient *http.Client
 }
 
 func NewHTTPRuntimeClient(endpoint string, client *http.Client) *HTTPRuntimeClient {
+	lifecycleClient := client
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
+		// reset/stop 包含原生场景资源清理，预算独立于快速状态读取。
+		// 创建仍返回 starting，长时间的就绪等待由 Profile 预算和状态轮询管理。
+		lifecycleClient = &http.Client{Timeout: 90 * time.Second}
 	}
-	return &HTTPRuntimeClient{endpoint: strings.TrimRight(endpoint, "/"), client: client}
+	return &HTTPRuntimeClient{endpoint: strings.TrimRight(endpoint, "/"), client: client, lifecycleClient: lifecycleClient}
 }
 
 func (c *HTTPRuntimeClient) Health(ctx context.Context) error {
@@ -127,6 +117,12 @@ func (c *HTTPRuntimeClient) SceneOperation(
 ) (SceneInstance, error) {
 	var result SceneInstance
 	path := "/api/v1/scene-instances/" + url.PathEscape(instanceID) + "/" + operation
+	if operation == "reset" || operation == "stop" {
+		// 使用请求局部副本，不能修改共享 client 的 Timeout，影响并发查询。
+		lifecycle := *c
+		lifecycle.client = c.lifecycleClient
+		return result, lifecycle.do(ctx, http.MethodPost, path, body, &result)
+	}
 	return result, c.do(ctx, http.MethodPost, path, body, &result)
 }
 
