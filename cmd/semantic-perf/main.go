@@ -1,3 +1,18 @@
+// Copyright 2026 InsightOS
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // semantic-perf 入口：读取观测库（默认 .output/semantic.db）聚合输出
 // 性能基线报告（markdown 到 stdout）。报告口径：计量分布（purpose/model
 // 占比）、每轮平均输入 token、耗时三分解（模型/工具/其他）、数据窗口。
