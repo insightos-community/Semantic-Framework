@@ -1,28 +1,36 @@
-# 原生 MuJoCo Robot Skill 本地调试
+# Local debugging of a native MuJoCo Robot Skill
 
-这个入口只用于调试一条真实 Robot Skill 物理链，不启动 Semantic Server、Web、
-Workflow 或 Agent。`semantic-pilot` 仍负责 Worker、Action 路由、Ability 调用和
-安全停止，不能直接执行 Skill Python 代替 Pilot。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## 前置组件
+This entry point is only for debugging one real Robot Skill physics chain; it
+does not start the Semantic Server, Web, Workflow, or Agent. `semantic-pilot`
+is still responsible for the Worker, Action routing, Ability invocation, and
+safety stop — you cannot execute the Skill Python directly in place of Pilot.
 
-运行命令前必须已经具备：
+## Prerequisites
 
-1. 一个 running 的 MuJoCo scene instance；
-2. 与该 scene instance 对应的 `robot-deployment.yaml`；
-3. 一个启动了七类 Ability 的 AbilityFramework；
-4. 安装了 Robot Skill SDK 与具体 Skill 依赖的 Python；
-5. 一个包含 `grasp_object`、`semantic_navigation`、`place_object` 目录的 Skill Catalog。
+Before running the commands, you must already have:
 
-同一 Robot不能同时由常驻 `semantic-pilot` 和本地调试命令控制。运行前应先停止
-对应的常驻 Robot instance，再用 `debug-stack` 重新启动 AF和Ability；不要仅凭
-“当前看起来 idle”绕过跨进程互斥边界。
+1. a running MuJoCo scene instance;
+2. the `robot-deployment.yaml` corresponding to that scene instance;
+3. an AbilityFramework with the seven Ability types started;
+4. a Python with the Robot Skill SDK and the concrete Skill's dependencies
+   installed;
+5. a Skill Catalog containing the `grasp_object`, `semantic_navigation`, and
+   `place_object` directories.
 
-`RobotDeployment` 提供 Robot ID、Runtime endpoint、scene instance ID、
-AbilityFramework endpoint、frame、tool、IK 和安全配置。Skill输入只保存业务目标，
-不重复这些部署参数。
+The same Robot cannot be controlled by both the resident `semantic-pilot` and
+the local debug command at the same time. Before running, stop the
+corresponding resident Robot instance first, then restart the AF and Abilities
+with `debug-stack`; do not bypass the cross-process mutual-exclusion boundary
+just because "it looks idle right now".
 
-## 构建
+`RobotDeployment` provides the Robot ID, Runtime endpoint, scene instance ID,
+AbilityFramework endpoint, frame, tool, IK, and safety configuration. The Skill
+input only holds the business objective and does not repeat these deployment
+parameters.
+
+## Build
 
 ```bash
 cd /home/wwy/agent_refractor/.worktrees/semantic-framework-robot
@@ -32,10 +40,11 @@ cd /home/wwy/agent_refractor/semantic-robot-deployment
 go build -o bin/semantic-robot-instance ./cmd/semantic-robot-instance
 ```
 
-## 启动本地组件栈
+## Starting the local component stack
 
-先停止同一 rendered instance 的完整 supervisor。该操作会让常驻 Pilot安全停止
-当前工作，然后依次停止 Ability和AF；不会停止 MuJoCo scene Runtime：
+First stop the full supervisor of the same rendered instance. This makes the
+resident Pilot safely stop its current work, then stops the Abilities and AF in
+turn; it does not stop the MuJoCo scene Runtime:
 
 ```bash
 DEPLOY_ROOT=/home/wwy/agent_refractor/semantic-robot-deployment
@@ -50,22 +59,25 @@ INSTANCE_ROOT="$FRAMEWORK_ROOT/.output/v050-mujoco-product/three-skills-instance
   --instance "$INSTANCE_ROOT"
 ```
 
-`debug-stack` 是前台进程。看到 `status: ready` 后保持此终端运行。它与完整实例
-共用 `instance.lock`，但不启动 Pilot、不连接Server，也不使用 access token。
+`debug-stack` is a foreground process. Keep this terminal running once you see
+`status: ready`. It shares `instance.lock` with the full instance, but does not
+start Pilot, does not connect to the Server, and does not use an access token.
 
-如果 `stop` 报告实例本来已经 stopped，可以直接运行 `debug-stack`。如果报告
-`interrupted`，不要继续启动本地调试，应先确认 Robot物理状态。
+If `stop` reports the instance was already stopped, you can run `debug-stack`
+directly. If it reports `interrupted`, do not continue starting local
+debugging — confirm the Robot's physical state first.
 
-需要观察 Runtime真实相机时，在另一个终端打开随仓样例页：
+When you need to observe the Runtime's real cameras, open the sample page
+shipped with the repository in another terminal:
 
 ```bash
 xdg-open "$FRAMEWORK_ROOT/examples/mujoco-skill-debug/live-camera.html?endpoint=http://127.0.0.1:18090&robot=r1_pro_tote_gripper-1"
 ```
 
-该页面只轮询 Runtime的 `camera.rgb`，不模拟 Robot状态，也不替代后续
-Semantic Web Physics Viewer。
+This page only polls the Runtime's `camera.rgb`; it does not simulate Robot
+state, nor does it replace the subsequent Semantic Web Physics Viewer.
 
-## 执行抓取
+## Executing a grasp
 
 ```bash
 FRAMEWORK_ROOT=/home/wwy/agent_refractor/.worktrees/semantic-framework-robot
@@ -84,38 +96,45 @@ BUNDLE_ROOT="$FRAMEWORK_ROOT/.output/v050-mujoco-product/bundle-stable-load"
   --timeout 10m
 ```
 
-上面的 `INSTANCE_ROOT` 和 `BUNDLE_ROOT` 是当前开发产物示例，不是稳定安装路径。
-重新创建 scene instance或重建类型包后，应替换为新实例生成的路径。禁止只修改
-`scene_instance_id` 而继续使用另一场景的 Robot ID或 Ability实例。
+The `INSTANCE_ROOT` and `BUNDLE_ROOT` above are examples of current development
+artifacts, not stable install paths. After recreating the scene instance or
+rebuilding the type package, replace them with the paths generated for the new
+instance. It is forbidden to only modify `scene_instance_id` while continuing
+to use another scene's Robot ID or Ability instances.
 
-命令输出中：
+In the command output:
 
-- `events.jsonl` 保存 Stage、Action、精确 Ability instance和反馈事件；
-- `result.json` 保存 Skill终态、业务结果、错误和安全停止结果；
-- Ctrl+C或超时会请求 `Skill stop → Ability stop → Robot hold`。
+- `events.jsonl` holds the Stage, Action, exact Ability instance, and feedback
+  events;
+- `result.json` holds the Skill final state, business result, errors, and
+  safety stop result;
+- Ctrl+C or a timeout requests `Skill stop → Ability stop → Robot hold`.
 
-如果执行进入 `waiting_agent`，本地命令会明确失败；本地调试不会用固定回复模拟
-Robot Agent。需要改变策略时，修改输入后从明确安全状态重新执行，或回到正式
-Semantic Framework链路。
+If execution enters `waiting_agent`, the local command fails explicitly; local
+debugging does not simulate the Robot Agent with fixed replies. When you need
+to change strategy, modify the input and re-execute from an explicit safe
+state, or return to the official Semantic Framework chain.
 
-退出顺序必须是：先等待 `skill run` 完成，或在该终端按 Ctrl+C并看到停止结果；
-再对 `debug-stack` 按 Ctrl+C。不要先关闭 AF和Ability。
+The exit order must be: first wait for `skill run` to complete, or press
+Ctrl+C in that terminal and see the stop result; then press Ctrl+C on
+`debug-stack`. Do not shut down the AF and Abilities first.
 
-## 参数来源
+## Parameter sources
 
-| 参数 | 是否必填 | 来源 |
+| Parameter | Required | Source |
 |---|---:|---|
-| `--profile` | 是 | 当前 scene/Robot生成的 RobotDeployment |
-| `--skill` | 是 | Skill Catalog中的精确 `name@version` |
-| `--input` | 是 | 业务输入 JSON；也可用 `-` 从 stdin读取 |
-| `--skill-catalog` | 开发态是 | Robot Skill源码目录；安装态默认读 Profile中的 active目录 |
-| `--python` | 开发态建议显式 | 类型包 Python，必须已安装 Robot Skill SDK和依赖 |
-| `--ability-framework` | 否 | 仅诊断时覆盖 Profile endpoint |
-| `--python-path` | 否 | 未安装源码依赖时的临时 import路径，可重复 |
-| `--execution-id` | 否 | 复现实验时指定；默认自动生成 |
-| `--events` | 否 | JSONL事件文件；默认 stderr |
-| `--result` | 否 | 最终 JSON文件；默认 stdout |
-| `--timeout` | 否 | 最长执行时间；默认 15 分钟 |
+| `--profile` | Yes | The RobotDeployment generated for the current scene/Robot |
+| `--skill` | Yes | The exact `name@version` in the Skill Catalog |
+| `--input` | Yes | Business input JSON; `-` also reads from stdin |
+| `--skill-catalog` | Yes in development | The Robot Skill source directory; in installed mode defaults to the active directory in the Profile |
+| `--python` | Explicit recommended in development | The type package Python, which must already have the Robot Skill SDK and dependencies installed |
+| `--ability-framework` | No | Overrides the Profile endpoint for diagnostics only |
+| `--python-path` | No | Temporary import path when source dependencies are not installed; repeatable |
+| `--execution-id` | No | Specify when reproducing experiments; auto-generated by default |
+| `--events` | No | JSONL event file; defaults to stderr |
+| `--result` | No | Final JSON file; defaults to stdout |
+| `--timeout` | No | Maximum execution time; defaults to 15 minutes |
 
-本地模式没有 `--project`、`--workflow`、`--task` 或 `--robot`：Robot来自
-RobotDeployment，其余对象在这条调试链中不存在。
+Local mode has no `--project`, `--workflow`, `--task`, or `--robot`: the Robot
+comes from the RobotDeployment, and the other objects do not exist in this
+debug chain.
