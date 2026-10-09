@@ -1,3 +1,18 @@
+// Copyright 2026 InsightOS
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package install
 
 import (
@@ -13,6 +28,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Options carries the optional install-time settings for a component/robot
+// install: preview generation, scene/component selection, project defaults,
+// various roots (asset/model/libero), endpoint and the accepted licenses.
 type Options struct {
 	GeneratePreviews *bool    `json:"generate_previews,omitempty"`
 	SceneIDs         []string `json:"scene_ids,omitempty"`
@@ -28,10 +46,14 @@ type Options struct {
 	Endpoint         string   `json:"endpoint,omitempty"`
 	AcceptedLicenses []string `json:"accepted_licenses,omitempty"`
 }
+
+// Installer runs a component install and returns the emitted log lines.
 type Installer func(context.Context, string, Record, string, Options, func(string)) ([]string, error)
 
 func (s *Inbox) SetInstaller(fn Installer) { s.mu.Lock(); defer s.mu.Unlock(); s.installer = fn }
 
+// InspectRuntimeManifest parses the runtime pack manifest header
+// (schema/name/version) embedded in a runtime archive.
 func InspectRuntimeManifest(data []byte) (Package, error) {
 	var header struct {
 		Schema  int    `yaml:"schema_version"`

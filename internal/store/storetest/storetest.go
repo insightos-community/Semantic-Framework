@@ -1,3 +1,18 @@
+// Copyright 2026 InsightOS
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Package storetest 为各包的测试提供“已迁移到最新 schema”的 SQLite 库。
 //
 // 为什么需要它：Migrate 要按版本号顺序执行 34 个迁移，每个迁移一个事务；
@@ -16,6 +31,10 @@
 //
 // 自带装配入口（不接受已打开的 Store，只接受库路径）的测试用 SeedMigratedAt，
 // 效果相同：把模板放到该路径，随后 Migrate 只剩版本检查。
+//
+// 用法：在各包的 TestMain 中接入一次，即可共享同一份已迁移模板，例如
+//
+//	func TestMain(m *testing.M) { storetest.Main(m) }
 package storetest
 
 import (
@@ -51,11 +70,8 @@ var (
 	templateDir  string
 )
 
-// Main 包装 m.Run，并在测试进程退出前回收共享模板目录。各包用
-//
-//	func TestMain(m *testing.M) { storetest.Main(m) }
-//
-// 接入，避免每次测试都在临时目录留下模板副本。
+// Main 包装 m.Run，并在测试进程退出前回收共享模板目录。各包按包注释中的
+// TestMain 用法接入，避免每次测试都在临时目录留下模板副本。
 func Main(m *testing.M) {
 	code := m.Run()
 	CleanupTemplate()
