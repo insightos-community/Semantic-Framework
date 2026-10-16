@@ -484,6 +484,10 @@ stop_actions:
 	if err != nil {
 		t.Fatal(err)
 	}
+	first, err = fx.st.AttachSubTaskExecution(first.ID, first.Revision, "rex-completed-query", now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err = fx.st.TransitionSubTask(first.ID, first.Revision, store.TaskStatusCompleted, "",
 		json.RawMessage(`{"held_object":{"object_ref":"object://box-17","grasp_candidate_id":"candidate-2"}}`), now); err != nil {
 		t.Fatal(err)
@@ -496,8 +500,10 @@ stop_actions:
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		`"completed_subtasks"`, `"result_summary":"抓取 box-17已完成"`,
-		`"execution_id":""`,
+		`"completed_subtasks"`, `"goal":"抓取 box-17"`,
+		`"result_summary":"该步骤调用已结束；业务效果以原执行结果为准。"`,
+		`"execution_id":"rex-completed-query"`,
+		`"result_lookup":{"arguments":{"execution_id":"rex-completed-query"},"tool":"robot.get"}`,
 		`"current_skill_contract"`, `"input_model":"scripts.models:GraspObjectInput"`,
 		`"base_footprint_radius_m":0.42`, `"navigation_resolution_m":0.05`,
 		`"manipulation_work_distance_m":0.55`,
@@ -786,8 +792,9 @@ func TestTaskContextMarksSummaryHistoricalAndUsesLiveRobotSnapshot(t *testing.T)
 		t.Fatal(err)
 	}
 	for _, message := range lean {
-		if message != nil && strings.Contains(message.Content,
-			"STALE_FULL_SKILL_DOCUMENT_AND_ROBOT_RUN_INPUT") {
+		if message != nil && (strings.Contains(message.Content,
+			"STALE_FULL_SKILL_DOCUMENT_AND_ROBOT_RUN_INPUT") ||
+			strings.Contains(message.Content, "历史记录曾写 Robot idle")) {
 			t.Fatalf("Robot Task Execution不得重复加载历史Skill文档与robot.run参数: %s",
 				message.Content)
 		}
@@ -795,7 +802,7 @@ func TestTaskContextMarksSummaryHistoricalAndUsesLiveRobotSnapshot(t *testing.T)
 }
 
 func TestPlanningToolPolicyFailsClosedForSideEffects(t *testing.T) {
-	blocked := []string{"execute", "execute_host", "artifact.put", "skill.run", "mcp.github.create_issue"}
+	blocked := []string{"execute", "execute_host", "artifact.put", "skill.run", "robot.run", "robot.stop", "mcp.github.create_issue"}
 	for _, name := range blocked {
 		t.Run(name, func(t *testing.T) {
 			called := false
@@ -823,7 +830,7 @@ func TestPlanningToolPolicyFailsClosedForSideEffects(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{planningSkillTool, "map.query", "robot.list", "interaction.ask"} {
+	for _, name := range []string{planningSkillTool, "map.query", "robot.list", "robot.get", "interaction.ask"} {
 		t.Run("allow "+name, func(t *testing.T) {
 			called := false
 			_, err := (planningToolPolicy{}).WrapToolCall(context.Background(),
@@ -1030,10 +1037,27 @@ func TestTaskPlanningCorrectsInvalidJSONWithinSameRun(t *testing.T) {
 	fx := newTestFixture(t)
 	model := kernel.NewMockChatModel()
 	model.SetScript(
+		kernel.MockReply{ToolCalls: []schema.ToolCall{{ID: "read-flow", Type: "function",
+			Function: schema.FunctionCall{Name: "skill", Arguments: `{"skill":"flow-guide"}`}}}},
 		kernel.MockReply{Content: `{"summary":"非法输出","subtasks":[{"id":"sub-invalid","kind":"agent_step","goal":"执行","spec":{"instruction":"执行","匿名说明"}}]}`},
 		kernel.MockReply{Content: `{"summary":"生成一个开发步骤","subtasks":[{"id":"sub-valid","kind":"agent_step","goal":"执行","spec":{"instruction":"执行"},"completion_criteria":{"done":true},"depends_on":[]}]}`},
 	)
 	svc := newWorkflowRuntimeForTest(t, fx, model)
+	skillRoot := t.TempDir()
+	skillDir := filepath.Join(skillRoot, "developer", "flow-guide")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(
+		"---\nname: flow-guide\ndescription: Planning dependency reference\n---\n"+
+			"READ_ONLY_FLOW_EVIDENCE: prepare before execute, refresh feedback before landing.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	guide, err := skill.NewStore(skillRoot, fx.logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetSkillStore(guide)
 	project, err := fx.st.EnsureDefaultProject("usr-task-correction")
 	if err != nil {
 		t.Fatal(err)
@@ -1049,27 +1073,44 @@ func TestTaskPlanningCorrectsInvalidJSONWithinSameRun(t *testing.T) {
 			ID: "task-correction", RequiredRole: "developer", Goal: "完成一步开发工作",
 		}},
 	}, now)
-	items, err := svc.PlanTask(context.Background(), workflow.TaskPlanRequest{
-		UserID: project.OwnerID, Project: project, Conversation: conversation,
-		Workflow: view.Workflow, Task: store.TaskDraft{
-			ID: view.Tasks[0].ID, RequiredRole: view.Tasks[0].RequiredRole,
-			Goal: view.Tasks[0].Goal,
-		},
-	})
+	task := view.Tasks[0]
+	var items []store.SubTaskDraft
+	_, err = svc.runTaskAgent(context.Background(), project.OwnerID, project, conversation,
+		view.Workflow, "", &task, "developer-1", buildTaskPlanningPrompt([]byte(`{}`), ""),
+		nil, guide, store.RunKindTaskPlanning, "", func(body string) error {
+			var problem error
+			items, problem = decodeAndValidateTaskPlan(body, task, robotTaskPlanningView{})
+			return problem
+		})
 	if err != nil || len(items) != 1 || items[0].ID != "sub-valid" {
 		t.Fatalf("同一Run内格式纠正应返回后续合法计划: items=%+v err=%v", items, err)
 	}
-	if calls := model.CallInputs(); len(calls) != 2 {
+	if calls := model.CallInputs(); len(calls) != 3 {
 		t.Fatalf("首次错误后应在同一Run继续一次模型交换: calls=%d", len(calls))
 	} else {
 		var prompt strings.Builder
-		for _, message := range calls[1] {
+		for _, message := range calls[2] {
 			if message != nil {
 				prompt.WriteString(message.Content)
 			}
 		}
 		if !strings.Contains(prompt.String(), "纠正次数有上限") || !strings.Contains(prompt.String(), "byte_offset=") {
 			t.Fatalf("后续交换缺少纠正上限与定位信息: %s", prompt.String())
+		}
+		found := false
+		for _, message := range calls[2] {
+			if message.Role == schema.Tool && message.ToolCallID == "read-flow" &&
+				strings.Contains(message.Content, "READ_ONLY_FLOW_EVIDENCE") {
+				found = true
+			}
+		}
+		if !found {
+			for i, messages := range calls {
+				for _, message := range messages {
+					t.Logf("call %d role %s tool %s: %.200s", i, message.Role, message.ToolCallID, message.Content)
+				}
+			}
+			t.Fatal("Format correction lost the previously loaded dependency reference")
 		}
 	}
 	runs, _, err := fx.st.ListRunSessions(store.RunFilter{ChatSessionID: conversation.ID}, 0, 0)

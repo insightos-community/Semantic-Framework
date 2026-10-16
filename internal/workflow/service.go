@@ -35,6 +35,8 @@ type Service struct {
 	executor            TaskExecutor
 	robotReply          RobotAgentReplySink
 	robotStop           RobotExecutionStopper
+	robotAvailability   RobotAvailability
+	answeredTaskResumer AnsweredTaskResumer
 	conversationResumer ConversationInteractionResumer
 	bus                 *event.Bus
 
@@ -53,6 +55,8 @@ func NewService(deps Deps) (*Service, error) {
 		st: deps.Store, bus: deps.Bus, planner: deps.Planner, executor: deps.Executor,
 		robotReply:          deps.RobotReply,
 		robotStop:           deps.RobotStop,
+		robotAvailability:   deps.RobotAvailability,
+		answeredTaskResumer: deps.AnsweredTaskResumer,
 		conversationResumer: deps.ConversationResumer,
 		activeTasks:         make(map[string]context.CancelFunc),
 		activeResources:     make(map[string]string),
@@ -122,9 +126,13 @@ func (s *Service) ResumeWorkflow(ctx context.Context, userID, projectID, workflo
 		return store.WorkflowView{}, err
 	}
 	if err := s.resumePausedTasks(ctx, userID, workflowID); err != nil {
-		if current, getErr := s.st.GetWorkflow(workflowID); getErr == nil && current.Status == store.WorkflowStatusRunning {
-			_, _ = s.st.TransitionWorkflowWithReason(workflowID, current.Revision,
-				store.WorkflowStatusPaused, "resume_failed", time.Now().UTC())
+		reason := "resume_failed"
+		if errors.Is(err, ErrTaskWaitingResource) {
+			reason = current.Workflow.Reason
+		}
+		if latest, getErr := s.st.GetWorkflow(workflowID); getErr == nil && latest.Status == store.WorkflowStatusRunning {
+			_, _ = s.st.TransitionWorkflowWithReason(workflowID, latest.Revision,
+				store.WorkflowStatusPaused, reason, time.Now().UTC())
 		}
 		return store.WorkflowView{}, err
 	}
@@ -136,15 +144,12 @@ func (s *Service) ResumeWorkflow(ctx context.Context, userID, projectID, workflo
 	return result, err
 }
 
-// RetryRobotAgentDecision 只对 robot_agent_decision_failed 重开 Decision Run。
-// 它不得走通用 Resume：resumePausedTasks 会 launchReservedTask 并再次 robot.run。
+// RetryRobotAgentDecision 显式重开失败的 checkpoint 或 Task recovery 决策。
+// 对 user_paused 的 recovery_exhausted，点击此入口也明确恢复 Workflow；
+// 不走通用 Resume，不直接重放原 Action，仍检查失败归属和停止证据。
 func (s *Service) RetryRobotAgentDecision(ctx context.Context, userID, projectID, workflowID string,
 	expectedRevision int64) (store.WorkflowView, error) {
 	if s.executor == nil {
-		return store.WorkflowView{}, ErrExecutorUnavailable
-	}
-	decider, ok := s.executor.(RobotAgentDecisionExecutor)
-	if !ok || s.robotReply == nil {
 		return store.WorkflowView{}, ErrExecutorUnavailable
 	}
 	current, _, _, err := s.requireWorkflow(userID, projectID, workflowID)
@@ -153,6 +158,15 @@ func (s *Service) RetryRobotAgentDecision(ctx context.Context, userID, projectID
 	}
 	if current.Workflow.Revision != expectedRevision {
 		return store.WorkflowView{}, store.ErrRevisionConflict
+	}
+	if current.Workflow.Status == store.WorkflowStatusRunning ||
+		(current.Workflow.Status == store.WorkflowStatusPaused &&
+			(current.Workflow.Reason == "server_restarted" || current.Workflow.Reason == "user_paused")) {
+		return s.retryExhaustedTaskRecovery(ctx, current)
+	}
+	decider, ok := s.executor.(RobotAgentDecisionExecutor)
+	if !ok || s.robotReply == nil {
+		return store.WorkflowView{}, ErrExecutorUnavailable
 	}
 	task, subTask, execution, event, err := s.robotDecisionRetryTarget(current)
 	if err != nil {
@@ -419,7 +433,12 @@ func validateExplicitWorkflowResume(view store.WorkflowView) error {
 	switch view.Workflow.Reason {
 	case "user_paused":
 		for _, task := range view.Tasks {
-			if task.Status == store.TaskStatusPaused {
+			if task.Status == store.TaskStatusPaused && task.WaitingReason != "waiting_input" && task.WaitingReason != "server_restarted" {
+				return store.ErrInvalidState
+			}
+		}
+		for _, subTask := range view.SubTasks {
+			if subTask.Status == store.TaskStatusPaused && subTask.WaitingReason == "server_restarted" && subTask.ExecutionRef != "" {
 				return store.ErrInvalidState
 			}
 		}

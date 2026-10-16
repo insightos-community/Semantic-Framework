@@ -90,10 +90,17 @@ func (s *Service) OnRobotAvailabilityChanged(ctx context.Context, robotID string
 		}
 		waiting := false
 		for _, task := range view.Tasks {
+			if task.Status == store.TaskStatusPaused && task.WaitingReason == "waiting_resource" &&
+				task.AssignedRobotID == robotID {
+				_ = s.resumeRobotPreparation(context.WithoutCancel(ctx), task.ID)
+			}
 			if task.Status == store.TaskStatusPending && task.RequiredRole == "robot" &&
 				task.WaitingReason == "waiting_resource" {
 				waiting = true
-				break
+			}
+			if task.Status == store.TaskStatusPaused && task.WaitingReason == "waiting_input" &&
+				task.AssignedRobotID == robotID && s.answeredTaskResumer != nil {
+				_ = s.answeredTaskResumer.RecoverAnsweredTask(context.WithoutCancel(ctx), task.ID)
 			}
 		}
 		if !waiting {
@@ -372,6 +379,9 @@ func (s *Service) executeTask(ctx context.Context, userID string, workflow store
 	defer func() {
 		_, _ = s.st.FinishRunSession(run.ID, nil, runStatus, runError, time.Now().UTC())
 		s.releaseTask(task)
+		// A reconnect can race the pause while this Run still owns activeTasks.
+		// Recheck once after releasing it; future retries use availability events.
+		_ = s.resumeRobotPreparation(context.Background(), task.ID)
 		_ = s.continueOrFinishTask(context.Background(), task.ID)
 	}()
 	project, err := s.st.GetProject(workflow.ProjectID)
@@ -475,21 +485,78 @@ func (s *Service) executeTask(ctx context.Context, userID string, workflow store
 	if getErr != nil {
 		return
 	}
+	s.mu.Lock()
+	serverShutdown := s.shuttingDown
+	s.mu.Unlock()
+	if errors.Is(execErr, context.Canceled) && serverShutdown && current.Status != store.TaskStatusStopping {
+		// A Server shutdown cancels the Agent's context, not the user's approved
+		// workflow. Preserve running/pending steps for restart reconciliation;
+		// admitted Robot Executions remain bound and may never be replayed.
+		runStatus, runError = store.RunStatusCancelled, "Server shutdown; task preserved for restart reconciliation"
+		return
+	}
+	if errors.Is(execErr, context.Canceled) && current.Status == store.TaskStatusRunning {
+		// Cancelling the model Run while the Workflow is paused must not cancel
+		// the approved pending suffix. Only an unadmitted preparation can be
+		// requeued; an existing Robot Execution retains its original owner.
+		latestWorkflow, workflowErr := s.st.GetWorkflow(workflow.ID)
+		if workflowErr == nil && latestWorkflow.Status == store.WorkflowStatusPaused {
+			for _, step := range mustSubTasks(s.st, task.ID) {
+				if step.Status != store.TaskStatusRunning {
+					continue
+				}
+				if step.ExecutionRef != "" {
+					runStatus, runError = store.RunStatusCancelled, "Model Run cancelled; existing Robot Execution preserved"
+					return
+				}
+				if _, err := s.st.GetRobotExecutionBySubTask(step.ID); !errors.Is(err, store.ErrNotFound) {
+					runStatus, runError = store.RunStatusCancelled, "Model Run cancelled; admitted Robot Execution preserved"
+					return
+				}
+				if _, err := s.st.TransitionSubTask(step.ID, step.Revision, store.TaskStatusPaused,
+					"server_restarted", step.Result, time.Now().UTC()); err != nil {
+					runError = err.Error()
+					return
+				}
+			}
+			if _, err := s.st.TransitionTask(current.ID, current.Revision, store.TaskStatusPaused,
+				"server_restarted", current.ResultSummary, current.Evidence, time.Now().UTC()); err != nil {
+				runError = err.Error()
+				return
+			}
+			runStatus, runError = store.RunStatusCancelled, "Model preparation cancelled; approved pending steps preserved"
+			s.publishCurrent(workflow.ID, "task.paused")
+			return
+		}
+	}
 	if current.Status == store.TaskStatusStopping || errors.Is(execErr, context.Canceled) {
 		runStatus, runError = store.RunStatusCancelled, "Task 已停止"
 		_ = s.stopTaskSubTasks(context.Background(), workflow.ProjectID, task.ID)
 		current, _ = s.st.GetTask(task.ID)
 		if current.Status == store.TaskStatusStopping && taskSubTasksSafelyTerminal(mustSubTasks(s.st, task.ID)) {
 			_, _ = s.st.TransitionTask(current.ID, current.Revision, store.TaskStatusStopped,
-				"user_stopped", "", nil, time.Now().UTC())
+				current.WaitingReason, "", nil, time.Now().UTC())
 		}
 		return
 	}
-	if current.Status == store.TaskStatusPaused && errors.Is(execErr, ErrTaskWaitingInput) {
-		runStatus, runError = store.RunStatusCompleted, ""
+	if current.Status == store.TaskStatusPaused && current.WaitingReason == "waiting_input" {
+		// The question is already durable. A model error after asking (including
+		// its final iteration limit) must not cancel untouched downstream work.
+		// Keep the Run's diagnostic failure, but let the saved answer continue it.
+		if execErr == nil || errors.Is(execErr, ErrTaskWaitingInput) {
+			runStatus, runError = store.RunStatusCompleted, ""
+		} else {
+			runError = execErr.Error()
+		}
 		s.publishCurrent(workflow.ID, "task.waiting_input")
 		s.appendMilestone(workflow.ID, current.ID, "", "task_waiting_input", store.TaskStatusPaused)
 		return
+	}
+	if errors.Is(execErr, ErrTaskWaitingResource) {
+		if waitErr := s.pauseRobotPreparation(current, execErr, answer); waitErr == nil {
+			runStatus, runError = store.RunStatusCompleted, execErr.Error()
+			return
+		}
 	}
 	if execErr != nil {
 		runError = execErr.Error()
@@ -609,7 +676,7 @@ func (s *Service) continueOrFinishTask(parent context.Context, taskID string) er
 // Run。Task 在整个生命周期内保持 running，避免通过 running→pending 的伪状态
 // 来驱动调度；同一 Task 的 activeTasks 门禁保证只有一个可写 Agent Run。
 func (s *Service) launchRunningTask(parent context.Context, userID string,
-	workflow store.Workflow, task store.Task) error {
+	workflow store.Workflow, task store.Task, answers ...*store.Interaction) error {
 	now := time.Now().UTC()
 	run := store.RunSession{ID: store.NewRunSessionID(), ProjectID: workflow.ProjectID,
 		ChatSessionID: workflow.ConversationID, WorkflowID: workflow.ID, TaskID: task.ID,
@@ -629,7 +696,11 @@ func (s *Service) launchRunningTask(parent context.Context, userID string,
 	s.activeTasks[task.ID] = cancel
 	s.activeRuns[task.ID] = run.ID
 	s.mu.Unlock()
-	go s.executeTask(runCtx, userID, workflow, task, nil, run)
+	var answer *store.Interaction
+	if len(answers) > 0 {
+		answer = answers[0]
+	}
+	go s.executeTask(runCtx, userID, workflow, task, answer, run)
 	return nil
 }
 
@@ -818,7 +889,7 @@ func (s *Service) stopWorkflowTasks(ctx context.Context, projectID, workflowID s
 			store.TaskStatusPaused, store.TaskStatusStopping:
 			s.cancelTaskAttempt(task.ID)
 		}
-		task, err = s.moveTaskTowardStop(task)
+		task, err = s.moveTaskTowardStop(task, view.Workflow.Reason)
 		if err != nil {
 			return err
 		}
@@ -832,7 +903,7 @@ func (s *Service) stopWorkflowTasks(ctx context.Context, projectID, workflowID s
 		if latest.Status == store.TaskStatusStopping &&
 			taskSubTasksSafelyTerminal(mustSubTasks(s.st, latest.ID)) {
 			if _, err = s.st.TransitionTask(latest.ID, latest.Revision,
-				store.TaskStatusStopped, "user_stopped", "", nil, time.Now().UTC()); err != nil &&
+				store.TaskStatusStopped, latest.WaitingReason, "", nil, time.Now().UTC()); err != nil &&
 				!errors.Is(err, store.ErrRevisionConflict) {
 				return err
 			}
@@ -841,7 +912,11 @@ func (s *Service) stopWorkflowTasks(ctx context.Context, projectID, workflowID s
 	return nil
 }
 
-func (s *Service) moveTaskTowardStop(task store.Task) (store.Task, error) {
+func (s *Service) moveTaskTowardStop(task store.Task, reasons ...string) (store.Task, error) {
+	reason := "user_stopped"
+	if len(reasons) > 0 && reasons[0] != "" {
+		reason = reasons[0]
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		var (
 			updated store.Task
@@ -850,10 +925,10 @@ func (s *Service) moveTaskTowardStop(task store.Task) (store.Task, error) {
 		switch task.Status {
 		case store.TaskStatusPending:
 			updated, err = s.st.TransitionTask(task.ID, task.Revision,
-				store.TaskStatusStopped, "user_stopped", "", nil, time.Now().UTC())
+				store.TaskStatusStopped, reason, "", nil, time.Now().UTC())
 		case store.TaskStatusRunning, store.TaskStatusPaused:
 			updated, err = s.st.TransitionTask(task.ID, task.Revision,
-				store.TaskStatusStopping, "user_stopped", "", nil, time.Now().UTC())
+				store.TaskStatusStopping, reason, "", nil, time.Now().UTC())
 		default:
 			return task, nil
 		}
@@ -1040,19 +1115,25 @@ func missingRobotExecution(executionID string) store.RobotExecution {
 }
 
 func (s *Service) robotExecutionStartedPhysicalAction(executionID string) (bool, error) {
-	events, err := s.st.ListRobotExecutionEvents(executionID, 0, 1000)
-	if err != nil {
-		return false, err
-	}
-	for _, item := range events {
-		if item.Type == "action.started" {
-			started, _ := item.Payload["physical_started"].(bool)
-			if started {
-				return true, nil
+	var after int64
+	for {
+		events, err := s.st.ListRobotExecutionEvents(executionID, after, 1000)
+		if err != nil {
+			return false, err
+		}
+		for _, item := range events {
+			after = item.Sequence
+			if item.Type == "action.started" {
+				started, _ := item.Payload["physical_started"].(bool)
+				if started {
+					return true, nil
+				}
 			}
 		}
+		if len(events) < 1000 {
+			return false, nil
+		}
 	}
-	return false, nil
 }
 
 func (s *Service) robotExecutionMayHavePhysicalAction(executionID string) (bool, error) {
@@ -1156,8 +1237,32 @@ func (s *Service) resumePausedTasks(parent context.Context, userID, workflowID s
 		if task.Status != store.TaskStatusPaused || !dependenciesCompleted(task.ID, view.Dependencies, completed) {
 			continue
 		}
+		// A question may be answered while its Workflow is explicitly paused.
+		// Resume the Workflow, then route that saved answer through the same
+		// continuation/recovery handler. An unanswered question keeps waiting;
+		// this path never resets or replays a Robot Execution.
+		if task.WaitingReason == "waiting_input" {
+			if s.answeredTaskResumer != nil {
+				if err := s.answeredTaskResumer.RecoverAnsweredTask(parent, task.ID); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if task.WaitingReason != "server_restarted" {
 			return store.ErrInvalidState
+		}
+		if task.RequiredRole == "robot" && s.robotAvailability != nil &&
+			!s.robotAvailability.IsRobotAvailable(task.AssignedRobotID) {
+			return ErrTaskWaitingResource
+		}
+		// Explicit resume may retry an interrupted continuation. Keep its saved
+		// answer and source association; StartTaskContinuation retains the old Run.
+		var answer *store.Interaction
+		if saved, answerErr := s.st.GetUnhandledAnsweredInteractionForTask(task.ID); answerErr == nil {
+			answer = &saved
+		} else if !errors.Is(answerErr, store.ErrNotFound) {
+			return answerErr
 		}
 		if !s.reserveTask(task) {
 			continue
@@ -1175,9 +1280,14 @@ func (s *Service) resumePausedTasks(parent context.Context, userID, workflowID s
 				return resumeErr
 			}
 		}
-		if launchErr := s.launchReservedTask(parent, userID, view.Workflow, task, nil, true); launchErr != nil {
+		if launchErr := s.launchReservedTask(parent, userID, view.Workflow, task, answer, true); launchErr != nil {
 			s.releaseTask(task)
 			return launchErr
+		}
+		if answer != nil {
+			if err := s.st.MarkInteractionHandled(answer.ID, time.Now().UTC(), ""); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1226,6 +1336,16 @@ func (s *Service) resumeTaskFromInteraction(parent context.Context, userID strin
 		if sourceRun.TaskID != task.ID || sourceRun.WorkflowID != view.Workflow.ID {
 			return store.ErrInvalidState
 		}
+		// The question Run has yielded and released its in-memory owner. Its
+		// persisted waiting_input row still holds the unique context slot;
+		// retire that answered question before creating the continuation Run.
+		// This completes only the Agent question, never the failed Robot Skill.
+		if sourceRun.Status == store.RunStatusWaitingInput {
+			if _, err := s.st.FinishRunSession(sourceRun.ID,
+				[]string{store.RunStatusWaitingInput}, store.RunStatusCompleted, "", time.Now().UTC()); err != nil {
+				return err
+			}
+		}
 		if sourceRun.Kind == store.RunKindTaskPlanning {
 			return s.resumeTaskPlanningFromInteraction(parent, userID, answer, view.Workflow, task)
 		}
@@ -1252,6 +1372,24 @@ func (s *Service) resumeTaskFromInteraction(parent context.Context, userID strin
 			}
 		}
 	}
+	// An answered pre-execution question must survive Server startup before its
+	// Pilot reconnects. Do not consume the answer or start an Agent Run yet.
+	if task.RequiredRole == "robot" && s.robotAvailability != nil &&
+		!s.robotAvailability.IsRobotAvailable(task.AssignedRobotID) {
+		return ErrTaskWaitingResource
+	}
+	if !s.reserveTask(task) {
+		return ErrTaskBusy
+	}
+	launched := false
+	defer func() {
+		if !launched {
+			s.releaseTask(task)
+		}
+	}()
+	if err := s.st.RestoreQuestionDependents(task.ID, answer.RunID, task.Revision, time.Now().UTC()); err != nil {
+		return err
+	}
 	for _, subTask := range view.SubTasks {
 		if subTask.TaskID != task.ID || subTask.Status != store.TaskStatusPaused {
 			continue
@@ -1263,16 +1401,13 @@ func (s *Service) resumeTaskFromInteraction(parent context.Context, userID strin
 			return resumeErr
 		}
 	}
-	if !s.reserveTask(task) {
-		return ErrTaskBusy
-	}
 	if err := s.launchReservedTask(parent, userID, view.Workflow, task, &answer); err != nil {
-		s.releaseTask(task)
 		if _, existingErr := s.st.GetRunSessionBySourceInteraction(answer.ID); existingErr == nil {
 			return nil
 		}
 		return err
 	}
+	launched = true
 	return nil
 }
 
@@ -1488,7 +1623,9 @@ func (s *Service) RecoverInterruptedWorkflows(now time.Time) error {
 			workflowPauseReason := "server_restarted"
 			for _, task := range currentView.Tasks {
 				if task.Status == store.TaskStatusPaused {
-					if task.WaitingReason != "waiting_input" {
+					// Resource waits were persisted before any Robot Execution was
+					// admitted. Reconnect rechecks that fact before resuming them.
+					if task.WaitingReason != "waiting_input" && task.WaitingReason != "waiting_resource" {
 						pausedForAnotherReason = true
 					}
 					if task.WaitingReason == "execution_state_unknown" {

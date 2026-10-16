@@ -89,6 +89,11 @@ func (s *Service) OnRobotExecutionChanged(ctx context.Context, execution store.R
 		}
 		return nil
 	case "failed":
+		// Delayed duplicate terminal events must not pause a replacement step.
+		if subTask.Status == store.TaskStatusFailed || subTask.Status == store.TaskStatusStopped ||
+			subTask.Status == store.TaskStatusCompleted {
+			return nil
+		}
 		if subTask.Status == store.TaskStatusStopping {
 			started, actionErr := s.robotExecutionMayHavePhysicalAction(execution.ID)
 			if actionErr != nil {
@@ -119,15 +124,17 @@ func (s *Service) OnRobotExecutionChanged(ctx context.Context, execution store.R
 				return heldErr
 			}
 			if safelyStoppedRobotExecution(execution) || held {
-				// 物理动作已发生，但 Ability 已留下安全保持证据（策略超时、
-				// 异常自终止同样由它撤销执行并核对 hold）。任务未达成而物理
-				// 状态可判定，直接收敛为 stopped，而不是永久 execution_state_unknown。
-				return s.finishConfirmedRobotStop(ctx, task, subTask, execution)
+				// A confirmed hold ends this Action, not necessarily the business
+				// goal. Let the existing read-only recovery Agent revise remaining
+				// steps; never replay the failed Execution. Explicit stops above
+				// still converge to stopped without entering recovery.
+				if _, supported := s.executor.(TaskRecoveryExecutor); !supported {
+					return s.finishConfirmedRobotStop(ctx, task, subTask, execution)
+				}
+			} else {
+				return s.pauseRobotSubTask(task, subTask, "execution_state_unknown",
+					robotExecutionResult(execution, eventType, payload))
 			}
-			// 物理Action已经改变Robot或场景，但失败结果没有明确hold证据。
-			// 此时不能启动Recovery重放原Skill，必须保留Robot锁等待对账。
-			return s.pauseRobotSubTask(task, subTask, "execution_state_unknown",
-				robotExecutionResult(execution, eventType, payload))
 		}
 		if err := s.pauseRobotSubTask(task, subTask, "robot_execution_failed",
 			robotExecutionResult(execution, eventType, payload)); err != nil {
@@ -657,6 +664,10 @@ func (s *Service) launchTaskRecovery(parent context.Context, taskID, subTaskID, 
 		subTask.ExecutionRef != execution.ID || execution.Status != "failed" {
 		return
 	}
+	workflowValue, workflowErr := s.st.GetWorkflow(task.WorkflowID)
+	if workflowErr != nil || workflowValue.Status != store.WorkflowStatusRunning {
+		return
+	}
 	if !s.reserveTask(task) {
 		return
 	}
@@ -673,7 +684,9 @@ func (s *Service) launchTaskRecovery(parent context.Context, taskID, subTaskID, 
 func (s *Service) launchReservedTaskRecovery(parent context.Context, task store.Task,
 	subTask store.SubTask, execution store.RobotExecution, answer *store.Interaction,
 	recovery TaskRecoveryExecutor) {
-	recoveryCtx, cancelRecovery := context.WithCancel(parent)
+	// Recovery outlives the HTTP/WS request that delivered an answer. Its
+	// lifetime is owned by the Task reservation and explicit cancellation.
+	recoveryCtx, cancelRecovery := context.WithCancel(context.WithoutCancel(parent))
 	if !s.bindReservedTaskCancel(task.ID, cancelRecovery) {
 		s.releaseTask(task)
 		return
@@ -684,10 +697,15 @@ func (s *Service) launchReservedTaskRecovery(parent context.Context, task store.
 			s.releaseTask(task)
 			if continueAfterRecovery {
 				_ = s.continueOrFinishTask(context.Background(), task.ID)
+			} else if s.answeredTaskResumer != nil {
+				// An answer can arrive before the question Run releases this
+				// reservation. Retry that saved answer once after yielding; the
+				// interaction router still checks Workflow/Task state and ownership.
+				_ = s.answeredTaskResumer.RecoverAnsweredTask(context.Background(), task.ID)
 			}
 		}()
 		workflowValue, workflowErr := s.st.GetWorkflow(task.WorkflowID)
-		if workflowErr != nil || execution.Status != "failed" {
+		if workflowErr != nil || workflowValue.Status != store.WorkflowStatusRunning || execution.Status != "failed" {
 			return
 		}
 		project, projectErr := s.st.GetProject(workflowValue.ProjectID)
@@ -695,11 +713,16 @@ func (s *Service) launchReservedTaskRecovery(parent context.Context, task store.
 		if projectErr != nil || conversationErr != nil {
 			return
 		}
-		decision, decideErr := recovery.RecoverTask(recoveryCtx, TaskRecoveryRequest{
-			UserID: project.OwnerID, Project: project, Conversation: conversation,
-			Workflow: workflowValue, Task: task, SubTask: subTask, Execution: execution,
-			Answer: answer,
-		})
+		evidence, evidenceErr := s.robotRecoveryActionEvidence(execution.ID)
+		var decision TaskRecoveryDecision
+		decideErr := evidenceErr
+		if decideErr == nil {
+			decision, decideErr = recovery.RecoverTask(recoveryCtx, TaskRecoveryRequest{
+				UserID: project.OwnerID, Project: project, Conversation: conversation,
+				Workflow: workflowValue, Task: task, SubTask: subTask, Execution: execution,
+				Answer: answer, ActionEvidence: evidence,
+			})
+		}
 		if decideErr != nil {
 			if errors.Is(decideErr, context.Canceled) || errors.Is(decideErr, ErrTaskWaitingInput) {
 				return
@@ -724,7 +747,7 @@ func (s *Service) launchReservedTaskRecovery(parent context.Context, task store.
 		switch decision.Decision {
 		case "revise_pending":
 			updated, _, applyErr := s.st.ApplyFailedRobotRecovery(task.ID, task.Revision,
-				subTask.ID, decision.Replacements, time.Now().UTC())
+				subTask.ID, decision.Replacements, time.Now().UTC(), decision.RetainPendingIDs...)
 			if applyErr != nil {
 				return
 			}
@@ -740,6 +763,35 @@ func (s *Service) launchReservedTaskRecovery(parent context.Context, task store.
 				"task_recovery_waiting", store.TaskStatusPaused)
 		}
 	}()
+}
+
+// Keep the exact task-scoped start/terminal proof available to recovery without
+// copying high-volume feedback or an old result's holding state as live truth.
+func (s *Service) robotRecoveryActionEvidence(executionID string) ([]map[string]any, error) {
+	var evidence []map[string]any
+	var after int64
+	for {
+		events, err := s.st.ListRobotExecutionEvents(executionID, after, 1000)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range events {
+			after = item.Sequence
+			if item.Type != "action.started" && item.Type != "action.terminal" && item.Type != "stage.failed" {
+				continue
+			}
+			facts := map[string]any{"event": item.Type, "sequence": item.Sequence}
+			for _, key := range []string{"action_id", "action_type", "ability_instance_id", "framework_task_id", "execution_protocol", "physical", "physical_started", "status", "error", "stop_evidence", "stage", "deviation", "summary", "next_step"} {
+				if value, exists := item.Payload[key]; exists {
+					facts[key] = value
+				}
+			}
+			evidence = append(evidence, facts)
+		}
+		if len(events) < 1000 {
+			return evidence, nil
+		}
+	}
 }
 
 func (s *Service) resumeTaskRecoveryFromInteraction(parent context.Context,

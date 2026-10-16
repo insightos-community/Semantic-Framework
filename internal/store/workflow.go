@@ -1103,7 +1103,8 @@ func (s *Store) SetTaskSubTasks(taskID string, expectedRevision int64,
 // 只有 Pilot 已明确记录为 failed 的 Robot Execution 才能进入这里；interrupted
 // 或无法确认的执行保持 paused 和 Robot 锁，避免一次恢复决策重放物理动作。
 func (s *Store) ApplyFailedRobotRecovery(taskID string, expectedTaskRevision int64,
-	failedSubTaskID string, replacements []SubTaskDraft, now time.Time) (Task, []SubTask, error) {
+	failedSubTaskID string, replacements []SubTaskDraft, now time.Time, retainPendingIDs ...string) (Task, []SubTask, error) {
+	replacements = append([]SubTaskDraft(nil), replacements...)
 	if err := validateSubTaskDrafts(replacements); err != nil {
 		return Task{}, nil, err
 	}
@@ -1133,6 +1134,13 @@ func (s *Store) ApplyFailedRobotRecovery(taskID string, expectedTaskRevision int
 	}
 	if executionStatus != "failed" {
 		return Task{}, nil, ErrInvalidState
+	}
+	// Keep exact IDs, specs, versions and criteria for unaffected pending steps.
+	// Dependency rewiring is computed before any mutation and committed together
+	// with the repair prefix, so a failed splice cannot leave a half-applied plan.
+	retained, retainedDeps, err := retainedRecoverySteps(tx, taskID, failedSubTaskID, retainPendingIDs, replacements)
+	if err != nil {
+		return Task{}, nil, err
 	}
 	if _, err := tx.Exec(`UPDATE subtasks SET status=?,waiting_reason=?,revision=revision+1,
 		updated_at=?,ended_at=? WHERE id=? AND revision=? AND status=?`, TaskStatusFailed,
@@ -1170,6 +1178,25 @@ func (s *Store) ApplyFailedRobotRecovery(taskID string, expectedTaskRevision int
 			}
 		}
 	}
+	for index, item := range retained {
+		if _, err := tx.Exec(`UPDATE subtasks SET position=?,status=?,waiting_reason='',ended_at=NULL,
+			revision=revision+1,updated_at=? WHERE id=?`, position+len(replacements)+index,
+			TaskStatusPending, now, item.ID); err != nil {
+			return Task{}, nil, err
+		}
+		if _, err := tx.Exec(`DELETE FROM subtask_dependencies WHERE task_id=? AND subtask_id=?`, taskID, item.ID); err != nil {
+			return Task{}, nil, err
+		}
+		for _, dependency := range retainedDeps[item.ID] {
+			// Repair IDs are mapped once; retained/completed IDs stay unchanged.
+			if mapped, ok := replacementIDs[dependency]; ok {
+				dependency = mapped
+			}
+			if _, err := tx.Exec(`INSERT INTO subtask_dependencies (task_id,subtask_id,depends_on_subtask_id) VALUES (?,?,?)`, taskID, item.ID, dependency); err != nil {
+				return Task{}, nil, err
+			}
+		}
+	}
 	result, err := tx.Exec(`UPDATE tasks SET status=?,waiting_reason="",revision=revision+1,
 		updated_at=? WHERE id=? AND revision=? AND status=?`, TaskStatusRunning, now,
 		taskID, expectedTaskRevision, TaskStatusPaused)
@@ -1191,14 +1218,15 @@ func (s *Store) ApplyFailedRobotRecovery(taskID string, expectedTaskRevision int
 }
 
 // ResumePausedAgentStep 只供用户显式恢复或已回答 Interaction 使用。普通 Agent
-// 步骤没有外部物理执行时可以重新排队；Robot Skill 仅在 Server 重启且确认
-// 尚未建立 execution_ref 时可安全回到 pending。已有物理执行必须先按原
+// 步骤没有外部物理执行时可以重新排队；Robot Skill 在 Server 重启或回答执行前
+// 问题后，确认尚未建立 Execution 时可回到 pending。已有物理执行必须先按原
 // Execution 对账，不能通过恢复 Workflow 隐式重放。
 func (s *Store) ResumePausedAgentStep(id string, expectedRevision int64, now time.Time) (SubTask, error) {
 	result, err := s.db.Exec(`UPDATE subtasks SET status=?,waiting_reason='',
 		revision=revision+1,updated_at=? WHERE id=? AND revision=? AND status=?
 		AND execution_ref='' AND (kind='agent_step' OR
-		(kind='robot_skill' AND waiting_reason='server_restarted'))`, TaskStatusPending, now, id,
+		(kind='robot_skill' AND waiting_reason IN ('server_restarted','waiting_input')
+		 AND NOT EXISTS (SELECT 1 FROM robot_executions e WHERE e.subtask_id=subtasks.id)))`, TaskStatusPending, now, id,
 		expectedRevision, TaskStatusPaused)
 	if err != nil {
 		return SubTask{}, err
@@ -1207,6 +1235,29 @@ func (s *Store) ResumePausedAgentStep(id string, expectedRevision int64, now tim
 		return SubTask{}, ErrInvalidState
 	}
 	return s.GetSubTask(id)
+}
+
+// RestoreQuestionDependents repairs an older scheduler bug: a model error after
+// persisting a question stopped pending dependents while leaving their Task in
+// waiting_input. Only the failed source Run's answered, unstarted question may
+// restore these never-admitted steps. User stops and physical executions remain
+// terminal. The caller continues through the ordinary answer-routing path.
+func (s *Store) RestoreQuestionDependents(taskID, sourceRunID string, expectedRevision int64, now time.Time) error {
+	_, err := s.db.Exec(`UPDATE subtasks SET status='pending',waiting_reason='',
+		revision=revision+1,updated_at=?,ended_at=NULL
+		WHERE task_id=? AND status='stopped' AND waiting_reason='task_failed' AND execution_ref=''
+		AND NOT EXISTS(SELECT 1 FROM robot_executions e WHERE e.subtask_id=subtasks.id)
+		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=subtasks.task_id AND t.revision=?
+		 AND t.status='paused' AND t.waiting_reason='waiting_input')
+		AND EXISTS(SELECT 1 FROM run_sessions r WHERE r.id=? AND r.task_id=subtasks.task_id AND r.status='failed')
+		AND EXISTS(SELECT 1 FROM interactions i WHERE i.task_id=subtasks.task_id AND i.run_id=? AND i.status='answered')
+		AND EXISTS(SELECT 1 FROM subtasks q WHERE q.task_id=subtasks.task_id AND q.status='paused'
+		 AND q.waiting_reason='waiting_input' AND q.execution_ref=''
+		 AND NOT EXISTS(SELECT 1 FROM robot_executions e WHERE e.subtask_id=q.id))
+		AND NOT EXISTS(SELECT 1 FROM subtasks q WHERE q.task_id=subtasks.task_id
+		 AND (q.status IN ('failed','running','stopping') OR (q.status='paused' AND
+		 (q.waiting_reason<>'waiting_input' OR q.execution_ref<>''))))`, now, taskID, expectedRevision, sourceRunID, sourceRunID)
+	return err
 }
 
 // ListRunnableSubTasks 返回依赖均完成的 pending SubTask；调用方仍需检查

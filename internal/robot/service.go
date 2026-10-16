@@ -287,7 +287,7 @@ func (s *Service) disconnect(pilotID string, expected *pilotSession) {
 	pilot.RobotStatus = "offline"
 	pilot.AbilityFrameworkStatus = "offline"
 	pilot.Revision++
-	pilot.LastSeenAt = s.now().UTC()
+	// Keep the last received heartbeat; disconnect time is not a new report.
 	s.mu.Unlock()
 	_ = s.st.SaveRobotPilot(pilot)
 	s.events.PublishRobotEvent("", "pilot", pilotID, "pilot.offline", pilot.Revision, pilot)
@@ -380,6 +380,19 @@ func (s *Service) IsOnline(pilotID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sessions[pilotID] != nil
+}
+
+// IsRobotAvailable uses the live connection, not an online flag persisted before
+// a Server restart. Continuations wait for the existing availability event.
+func (s *Service) IsRobotAvailable(robotID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, session := range s.sessions {
+		if session.pilot.RobotID == robotID && robotAvailable(session.pilot) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) sendCommand(pilotID, typ string, payload any) (string, error) {

@@ -109,20 +109,22 @@ type TaskExecutor interface {
 }
 
 type TaskRecoveryRequest struct {
-	UserID       string
-	Project      store.Project
-	Conversation store.ChatSession
-	Workflow     store.Workflow
-	Task         store.Task
-	SubTask      store.SubTask
-	Execution    store.RobotExecution
-	Answer       *store.Interaction
+	UserID         string
+	Project        store.Project
+	Conversation   store.ChatSession
+	Workflow       store.Workflow
+	Task           store.Task
+	SubTask        store.SubTask
+	Execution      store.RobotExecution
+	ActionEvidence []map[string]any
+	Answer         *store.Interaction
 }
 
 type TaskRecoveryDecision struct {
-	Decision     string
-	Replacements []store.SubTaskDraft
-	Summary      string
+	Decision         string
+	Replacements     []store.SubTaskDraft
+	RetainPendingIDs []string
+	Summary          string
 }
 
 // TaskRecoveryExecutor 只处理已经明确 failed 的 Robot Execution。它可以
@@ -167,6 +169,14 @@ type RobotExecutionStopper interface {
 		userID, reason string) (store.RobotExecution, error)
 }
 
+type RobotAvailability interface {
+	IsRobotAvailable(robotID string) bool
+}
+
+type AnsweredTaskResumer interface {
+	RecoverAnsweredTask(context.Context, string) error
+}
+
 type Deps struct {
 	Store               *store.Store
 	Bus                 *event.Bus
@@ -174,5 +184,7 @@ type Deps struct {
 	Executor            TaskExecutor
 	RobotReply          RobotAgentReplySink
 	RobotStop           RobotExecutionStopper
+	RobotAvailability   RobotAvailability
+	AnsweredTaskResumer AnsweredTaskResumer
 	ConversationResumer ConversationInteractionResumer
 }

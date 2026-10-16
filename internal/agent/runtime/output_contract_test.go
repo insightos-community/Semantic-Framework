@@ -3,8 +3,11 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/cloudwego/eino/schema"
 
 	"insightos.cn/semantic-framework/internal/agent/kernel"
 	"insightos.cn/semantic-framework/internal/store"
@@ -111,6 +114,23 @@ func TestRecoveryUsesBoundedCorrectionWithoutPhysicalExecution(t *testing.T) {
 	}
 	view := approveRuntimeWorkflow(t, fx.st, project, conversation, store.WorkflowDraft{Goal: "recover", Tasks: []store.TaskDraft{{ID: "task-recovery", RequiredRole: "developer", Goal: "generic"}}}, now)
 	task := view.Tasks[0]
+	if _, err := fx.st.SaveProjectMemory(project.OwnerID, project.ID,
+		"RECOVERY_REUSABLE_METHOD: inspect fresh state before replanning", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.st.AppendContextMessage(store.ContextMessage{
+		ID: store.NewChatMessageID(), ContextID: task.ContextID, ProjectID: project.ID,
+		SessionID: conversation.ID, TaskID: task.ID, AgentID: task.AssignedAgentID,
+		Message: schema.UserMessage("OLD_EXECUTION_PACKET"), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.st.SaveContextSummary(store.ContextSummary{
+		ContextID: task.ContextID, ProjectID: project.ID, SessionID: conversation.ID,
+		TaskID: task.ID, Summary: "OLD_TASK_STATE_SUMMARY",
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
 	text, err := svc.runTaskAgent(context.Background(), project.OwnerID, project, conversation, view.Workflow, "", &task, task.AssignedAgentID,
 		buildTaskRecoveryPrompt([]byte(`{}`)), nil, nil, store.RunKindTaskExecution, runtimePurposeTaskRecovery, func(text string) error {
 			_, err := decodeTaskRecoveryDecision(text, task, robotTaskPlanningView{})
@@ -118,6 +138,29 @@ func TestRecoveryUsesBoundedCorrectionWithoutPhysicalExecution(t *testing.T) {
 		})
 	if err != nil || len(model.CallInputs()) != 2 {
 		t.Fatalf("err=%v calls=%d", err, len(model.CallInputs()))
+	}
+	// Recovery may summarize its user context while loading long execution
+	// records. Its response schema must also remain in the system instruction.
+	var persistent string
+	for _, message := range model.CallInputs()[0] {
+		if message.Role == schema.System {
+			persistent += message.Content
+		}
+	}
+	if !strings.Contains(persistent, taskRecoveryInstruction) ||
+		!strings.Contains(persistent, robotResultLookupInstruction) {
+		t.Fatal("recovery contract and result lookup must survive context summarization")
+	}
+	if !strings.Contains(persistent, "RECOVERY_REUSABLE_METHOD") {
+		t.Fatal("recovery lost Project Memory with the excluded execution history")
+	}
+	for _, call := range model.CallInputs() {
+		for _, message := range call {
+			if strings.Contains(message.Content, "OLD_EXECUTION_PACKET") ||
+				strings.Contains(message.Content, "OLD_TASK_STATE_SUMMARY") {
+				t.Fatal("recovery reloaded stale execution history")
+			}
+		}
 	}
 	decision, err := decodeTaskRecoveryDecision(text, task, robotTaskPlanningView{})
 	if err != nil || decision.Decision != "fail_task" {
