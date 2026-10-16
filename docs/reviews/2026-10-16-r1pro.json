@@ -1,0 +1,725 @@
+{
+  "tool": "@alibaba-group/open-code-review",
+  "version": "1.13.0",
+  "mode": "delegate",
+  "reviewer": "host developer agent",
+  "reviewed_base": "6ade97fbde4bc6f4e76b3af0d490ffb6653a91b7",
+  "reviewed_head": "839d2fd1d85fbae9ecad313573fff651c6de3648",
+  "scope": "Product code before this documentation/acceptance commit. This receipt is not an independent external-model approval or physical validation.",
+  "summary": {
+    "total_files": 117,
+    "reviewed_files": 63,
+    "skipped_files": 54,
+    "coverage_rate": 0.5385,
+    "reviewable_coverage_rate": 1.0
+  },
+  "checklist": [
+    {
+      "path": "cmd/semantic-pilot/main.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "configs/agents/leader/role.yaml",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "configs/agents/query/role.yaml",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "configs/agents/robot/role.yaml",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/agent/runtime/purpose_exchange_evidence.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_failure_context.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_prompts.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_runtime.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_summary.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_terminal_context.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/bootstrap/wire_access.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/interaction/service.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/discovery.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/journal.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/map_assets.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/map_sync.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/operator_reconciliation.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/remote.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/runner.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/runtime.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/sdk_task.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/skillcatalog.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/store.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/supervisor.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/twin_sync.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/pilot/types.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/devices.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/gateway.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/input_bindings.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/pilot_map.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/pilot_twin.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/project_localization.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/project_robots.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/result_values.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/robot/service.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/auth/middleware.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/http/handlers/pilot_map.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/http/handlers/pilot_twin.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/http/handlers/project_robots.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/http/handlers/robots.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/http/handlers/simulation.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/http/handlers/simulation_resources.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/http/router.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/server/ws/devices.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/migrate.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/pilot_map.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/pilot_map_asset.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/pilot_map_source.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/project_robot.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/robot.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/robot_preparation.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/semantic_map.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/workflow.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/store/workflow_recovery_splice.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/tool/builtin/robot.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/tool/builtin/robot_list.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/tool/execution_scope.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/workflow/recovery_retry.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/workflow/robot_execution.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/workflow/robot_preparation.go",
+      "change_status": "added",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/workflow/scheduler.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/workflow/service.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "internal/workflow/types.go",
+      "change_status": "modified",
+      "review_status": "reviewed",
+      "reason": "Host-agent diff and reachable-context review using OCR delegate rules."
+    },
+    {
+      "path": "configs/agents/leader/AGENT.md",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "configs/agents/query/AGENT.md",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "configs/skills/README.md",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "configs/skills/robot/depalletizing-robot-task/SKILL.md",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "configs/skills/robot/kitchen-pick-place-task/SKILL.md",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "configs/skills/workflow/kitchen-workflow-planning/SKILL.md",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "docs/pilot-map-sources.md",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/kitchen_skills_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/output_contract_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/purpose_exchange_evidence_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_completion_context_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_failure_context_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_recovery_splice_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_resource_wait_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_runtime_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/agent/runtime/workflow_terminal_context_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/pilot/discovery_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/pilot/map_sync_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/pilot/operator_reconciliation_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/pilot/sdk_task_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/pilot/supervisor_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/pilot/twin_sync_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/availability_resume_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/device_sync_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/gateway_health_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/input_bindings_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/operator_reconciliation_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/pilot_map_source_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/pilot_map_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/pilot_twin_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/project_localization_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/project_robots_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/r1pro_skill_packages_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/service_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/skillpackage_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/robot/task_input_intent_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/server/http/handlers/pilot_map_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/server/http/handlers/robot_input_error_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/server/http/handlers/robots_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/store/pilot_map_asset_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/store/pilot_map_source_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/store/project_robot_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/tool/builtin/robot_list_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/tool/builtin/robot_result_paths_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/tool/builtin/robot_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/held_failure_recovery_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/paused_failure_retry_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/recovery_answer_lifecycle_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/recovery_diagnostics_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/recovery_retry_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/recovery_splice_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/robot_execution_test.go",
+      "change_status": "modified",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/robot_input_resume_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    },
+    {
+      "path": "internal/workflow/robot_preparation_test.go",
+      "change_status": "added",
+      "review_status": "skipped",
+      "reason": "OCR default path filter: test/documentation; automated tests executed separately."
+    }
+  ],
+  "findings": [],
+  "limitations": [
+    "Tests and documentation follow the OCR default exclusion policy; unit/integration suites are reported independently.",
+    "No live robot execution, deployment, independent model review or administrator approval of main is claimed."
+  ]
+}
