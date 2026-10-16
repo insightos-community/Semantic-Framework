@@ -228,8 +228,14 @@ func (h *SimulationHandler) HandleListProjectScenes(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusInternalServerError, CodeInternal, "读取 Project 场景失败")
 		return
 	}
+	realScene, err := h.projects.GetProjectRealScene(projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, CodeInternal, "读取实机场景失败")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project_scenes": references, "catalog_scenes": h.simulation.SceneCatalogForProject(projectID, ""),
+		"real_scene": realScene,
 	})
 }
 

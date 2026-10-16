@@ -445,6 +445,8 @@ func writeRobotError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, 404, "ROBOT_NOT_FOUND", err.Error())
+	case errors.Is(err, store.ErrInvalidState), errors.Is(err, store.ErrProjectArchived):
+		writeError(w, 409, "ROBOT_PROJECT_CONFLICT", err.Error())
 	case errors.Is(err, robotdomain.ErrPilotOffline):
 		writeError(w, 503, "PILOT_OFFLINE", err.Error())
 	case errors.Is(err, robotdomain.ErrRobotBusy):

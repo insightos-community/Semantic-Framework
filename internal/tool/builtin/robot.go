@@ -31,7 +31,7 @@ import (
 )
 
 func RegisterRobotTools(reg *tool.Registry, service *robotdomain.Service) error {
-	for _, item := range []tool.Tool{&robotGetTool{service: service}, &robotRunTool{service: service}, &robotStopTool{service: service}} {
+	for _, item := range []tool.Tool{&robotListTool{service: service}, &robotGetTool{service: service}, &robotRunTool{service: service}, &robotStopTool{service: service}} {
 		if err := reg.Register(item); err != nil {
 			return err
 		}

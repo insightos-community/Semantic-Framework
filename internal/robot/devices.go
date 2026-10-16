@@ -210,6 +210,11 @@ func (s *Service) deviceView(pilot store.RobotPilot) (map[string]any, error) {
 		"configuration":        pilot.Configuration,
 		"runtime_instance":     pilot.RuntimeInstance,
 		"current_execution_id": pilot.CurrentExecutionID, "progress": nil}
+	projectIDs, err := s.st.RobotProjectIDs(pilot.RobotID)
+	if err != nil {
+		return nil, err
+	}
+	view["project_ids"] = projectIDs
 	if run, err := s.st.GetRobotConversationRun(pilot.RobotID); err == nil {
 		view["current_run"] = run
 		view["run_id"] = run.ID

@@ -7,8 +7,8 @@ instruction_file: AGENT.md
 # 深度模型不在安装模板中预置，避免新安装隐式依赖未配置的外部服务。
 
 tools:
-  namespaces: [system.*, artifact.*, execute, execute_host, plan.suggest, map.query]   # Skill 正文由 Eino Middleware 渐进加载
-  pinned: [system.time, plan.suggest, map.query]             # 常驻工具：启用 tool_search 时不经检索始终注入
+  namespaces: [system.*, artifact.*, execute, execute_host, plan.suggest, map.query, robot.list]   # Skill 正文由 Eino Middleware 渐进加载
+  pinned: [system.time, plan.suggest, map.query, robot.list]             # 常驻工具：启用 tool_search 时不经检索始终注入
   tool_search: true                              # 动态工具数超阈值（8）时经 ToolSearch 检索出现，以下全量注入
 
 limits:

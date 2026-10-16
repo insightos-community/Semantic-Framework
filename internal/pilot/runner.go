@@ -104,20 +104,21 @@ func (r *Runner) StartAction(ctx context.Context, request ActionRequest) (Action
 
 	now := r.now()
 	execution := ActionExecution{
-		ID:               "action-" + uuid.NewString(),
-		SkillExecutionID: request.SkillExecutionID,
-		Key:              request.Key,
-		RequestJSON:      requestJSON,
-		RobotID:          request.RobotID,
-		Action:           request.Action,
-		AbilityName:      binding.AbilityName,
-		TaskName:         binding.TaskName,
-		InstanceID:       binding.InstanceID,
-		InvocationID:     "invocation-" + uuid.NewString(),
-		Physical:         binding.Physical,
-		Status:           ActionAccepted,
-		StartedAt:        now,
-		UpdatedAt:        now,
+		ID:                "action-" + uuid.NewString(),
+		ExecutionProtocol: binding.ExecutionProtocol,
+		SkillExecutionID:  request.SkillExecutionID,
+		Key:               request.Key,
+		RequestJSON:       requestJSON,
+		RobotID:           request.RobotID,
+		Action:            request.Action,
+		AbilityName:       binding.AbilityName,
+		TaskName:          binding.TaskName,
+		InstanceID:        binding.InstanceID,
+		InvocationID:      "invocation-" + uuid.NewString(),
+		Physical:          binding.Physical,
+		Status:            ActionAccepted,
+		StartedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := r.journal.SaveAction(execution); err != nil {
 		return ActionExecution{}, err
@@ -133,10 +134,13 @@ func (r *Runner) StartAction(ctx context.Context, request ActionRequest) (Action
 	if input == nil {
 		input = make(map[string]any)
 	}
-	input["invocation_id"] = execution.InvocationID
-	input["robot_id"] = request.RobotID
+	if execution.ExecutionProtocol != SDKTaskProtocol {
+		input["invocation_id"] = execution.InvocationID
+		input["robot_id"] = request.RobotID
+	}
 	// StartTask 只调用一次。即使连接失败也按可能已产生物理效果处理，不自动重试。
-	task, err := r.client.StartTask(ctx, binding.InstanceID, binding.TaskName, input)
+	task, err := r.startAbility(ctx, execution, input)
+	execution.FrameworkTaskID = task.TaskID
 	if err != nil {
 		var rejected *AbilityStartRejectedError
 		if errors.As(err, &rejected) {
@@ -147,7 +151,7 @@ func (r *Runner) StartAction(ctx context.Context, request ActionRequest) (Action
 				delete(r.activePhysical, execution.RobotID)
 				r.mu.Unlock()
 			}
-		} else if state, reconcileErr := r.client.GetExecution(ctx, binding.InstanceID, execution.InvocationID, 0); reconcileErr == nil && confirmedAbilityTerminal(state.Status) {
+		} else if state, reconcileErr := r.queryAbility(ctx, execution); reconcileErr == nil && confirmedAbilityTerminal(state.Status) {
 			execution = r.applyAbilityState(execution, state)
 		} else {
 			execution.Status = ActionInterrupted
@@ -174,7 +178,7 @@ func (r *Runner) Refresh(ctx context.Context, executionID string) (ActionExecuti
 	if actionTerminal(execution.Status) {
 		return execution, nil
 	}
-	state, err := r.client.GetExecution(ctx, execution.InstanceID, execution.InvocationID, execution.FeedbackCursor)
+	state, err := r.queryAbility(ctx, execution)
 	if err != nil {
 		return r.markInterrupted(execution, "ABILITY_UNAVAILABLE", err.Error()), err
 	}
@@ -214,7 +218,7 @@ func (r *Runner) Stop(ctx context.Context, executionID, reason string) (ActionEx
 	if err := r.journal.SaveAction(execution); err != nil {
 		return ActionExecution{}, err
 	}
-	state, err := r.client.StopExecution(ctx, execution.InstanceID, execution.InvocationID, reason)
+	state, err := r.stopAbility(ctx, execution, reason)
 	if err != nil {
 		return r.markInterrupted(execution, "STOP_UNCONFIRMED", err.Error()), err
 	}

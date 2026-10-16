@@ -70,6 +70,9 @@ var migrations = []migration{
 	{version: 32, name: "create_trace_span_io", apply: migrateV32},
 	{version: 33, name: "converge_trace_io_and_conversation_robot_reservation", apply: migrateV33},
 	{version: 34, name: "idempotent_plan_proposal_submission_per_run", apply: migrateV34},
+	{version: 35, name: "pilot_map_sources_and_project_bindings", apply: migrateV35},
+	{version: 36, name: "pilot_map_visual_assets", apply: migrateV36},
+	{version: 37, name: "project_robot_bindings", apply: migrateV37},
 }
 
 func migrateV34(tx *sql.Tx) error {

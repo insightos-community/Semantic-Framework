@@ -60,7 +60,7 @@ func PilotIDFromContext(ctx context.Context) string {
 // request context；失败返回 401 与统一错误格式。
 func (s *Service) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/pilot/v1/transfers/") {
+		if strings.HasPrefix(r.URL.Path, "/pilot/v1/transfers/") || (r.URL.Path == "/pilot/v1/map-sync" || r.URL.Path == "/pilot/v1/robot-state") || strings.HasPrefix(r.URL.Path, "/pilot/v1/map-assets/") {
 			credential, err := s.store.GetPilotCredential(bearerToken(r))
 			if err != nil || credential.RevokedAt != nil {
 				writeError(w, http.StatusUnauthorized, "PILOT_CREDENTIAL_INVALID", "Pilot credential 无效")

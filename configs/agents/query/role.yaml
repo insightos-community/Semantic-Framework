@@ -6,8 +6,8 @@ instruction_file: AGENT.md
 # model 留空表示继承系统 Default；只有用户在 Agent 页固定模型时才写入该字段。
 
 tools:
-  namespaces: [system.*, artifact.get, artifact.list]   # 只读系统信息与产物查询
-  pinned: [artifact.get, artifact.list]   # 常驻工具：产物读取与列举不经检索始终注入
+  namespaces: [system.*, artifact.get, artifact.list, robot.list]   # 只读系统信息与产物查询
+  pinned: [artifact.get, artifact.list, robot.list]   # 常驻工具：产物读取与列举不经检索始终注入
   tool_search: false          # 工具数量大时启用 ToolSearch 动态检索
 
 limits:

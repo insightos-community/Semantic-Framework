@@ -241,3 +241,33 @@ func TestNamedAbilityRequiresUniqueHealthyInstance(t *testing.T) {
 		t.Fatal("name filter ignored", got)
 	}
 }
+
+func TestMapSourceDeploymentDoesNotRequireProject(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "robot.yaml")
+	err := os.WriteFile(path, []byte(`api_version: 1
+robot:
+  id: map-only-robot
+  model: R1PRO
+  backend: real
+ability_framework:
+  endpoint: http://127.0.0.1:18000
+map_sync:
+  enabled: true
+  console_url: http://user:secret@127.0.0.1:18050/?token=private
+  console_token_file: /private/console.token
+`), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := LoadRobotDeployment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := deployment.DeviceConfiguration()["map_sync"].(map[string]any)
+	if config["service_url"] != "http://127.0.0.1:18050/" || config["project_id"] != "" {
+		t.Fatalf("Map source configuration: %+v", config)
+	}
+	if _, exists := config["console_token_file"]; exists {
+		t.Fatal("Local credential path disclosed")
+	}
+}
