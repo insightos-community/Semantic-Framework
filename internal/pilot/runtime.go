@@ -771,6 +771,7 @@ func (r *SkillRuntime) startWorkerAction(ctx context.Context, execution SkillExe
 		"ability_instance_id": started.InstanceID,
 		"invocation_id":       started.InvocationID,
 		"framework_task_id":   started.FrameworkTaskID,
+		"execution_protocol":  started.ExecutionProtocol,
 		"status":              started.Status,
 		"physical":            started.Physical,
 		"physical_started":    started.Physical && !startRejected,
@@ -831,9 +832,11 @@ func (r *SkillRuntime) waitActionResult(ctx context.Context, executionID string,
 				"ability_instance_id": execution.InstanceID,
 				"invocation_id":       execution.InvocationID,
 				"framework_task_id":   execution.FrameworkTaskID,
+				"execution_protocol":  execution.ExecutionProtocol,
 				"status":              execution.Status,
 				"result":              cloneMap(execution.Result),
 				"error":               cloneMap(execution.Error),
+				"stop_evidence":       cloneMap(execution.StopEvidence),
 			}))
 			return actionResultPayload(execution), nil
 		}
@@ -1063,7 +1066,9 @@ func actionResultPayload(execution ActionExecution) map[string]any {
 	if execution.Status == ActionSucceeded {
 		payload["physical_effect"] = "confirmed"
 	}
-	if execution.Status == ActionFailed {
+	// A failed physical task may already have moved. Confirmed stop proves
+	// cessation, not absence of physical effects.
+	if execution.Status == ActionFailed && (!execution.Physical || stringValue(execution.Error["code"]) == "ABILITY_START_REJECTED") {
 		payload["physical_effect"] = "none"
 	}
 	if execution.Status == ActionStopped {

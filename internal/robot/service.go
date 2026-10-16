@@ -1094,6 +1094,7 @@ func (s *Service) ConfirmOperatorStop(
 		}
 		if execution.Status == "stopped" && execution.Result["safe"] == true &&
 			execution.Result["confirmation_source"] == "operator" {
+			_, _ = s.sendCommand(execution.PilotInstanceID, "reconcile.request", map[string]any{"requested_at": s.now().UTC()})
 			return execution, nil
 		}
 		// 正常活动执行不能通过人工确认跳过 robot.stop。仅 stopping 以及已经
@@ -1125,6 +1126,9 @@ func (s *Service) ConfirmOperatorStop(
 		return store.RobotExecution{}, err
 	}
 	s.publishExecution(execution, "robot.execution.stop_confirmed_by_operator", payload)
+	// Offline confirmations are delivered on reconnect. Online Pilots perform
+	// the same reconciliation now; this carries evidence, never a motion command.
+	_, _ = s.sendCommand(execution.PilotInstanceID, "reconcile.request", map[string]any{"requested_at": now})
 
 	// 只释放仍指向同一 execution_id 的锁。Robot 若已开始新执行，人工恢复
 	// 旧 Workflow 绝不能把新执行误标为空闲。
@@ -1246,6 +1250,12 @@ func (s *Service) HandlePilotEvent(pilotID, typ string, sequence int64, payload 
 	if err := s.st.AppendRobotExecutionEvent(event); err != nil {
 		return err
 	}
+	if operatorStopConfirmed(execution) {
+		// Keep late device diagnostics, but they cannot undo explicit operator
+		// reconciliation or reacquire the Robot on behalf of the old execution.
+		s.publishExecution(execution, typ, cloneMap(payload))
+		return nil
+	}
 	previousStatus := execution.Status
 	// skill_status 是所有 Pilot 事件附带的快照，并非生命周期命令。
 	// artifact.summary.announced 可能先携带 completed，却不包含 Skill result；
@@ -1350,6 +1360,21 @@ func executionLifecycleEvent(eventType string) bool {
 func (s *Service) recoverPersistedExecutionTerminal(execution store.RobotExecution) (
 	store.RobotExecution, map[string]any, bool, error,
 ) {
+	if operatorStopConfirmed(execution) {
+		if execution.Status == "stopped" {
+			return execution, nil, false, nil
+		}
+		// Repair older projections where a reconnect restored the pre-confirmation
+		// interruption while the audited operator evidence remained in Result.
+		execution.Status = "stopped"
+		execution.Error = nil
+		execution.Revision++
+		execution.UpdatedAt = s.now().UTC()
+		if err := s.st.SaveRobotExecution(execution); err != nil {
+			return execution, nil, false, err
+		}
+		return execution, map[string]any{"status": "stopped", "result": cloneMap(execution.Result)}, true, nil
+	}
 	events, err := s.st.ListRobotExecutionEvents(execution.ID, 0, 1000)
 	if err != nil {
 		return execution, nil, false, err
@@ -1416,9 +1441,25 @@ func (s *Service) Reconcile(pilotID string, remote []map[string]any) ([]store.Ro
 			remoteByID[id] = item
 		}
 	}
+	// Unknown physical owners can outlive the recent-history window.
+	seen := map[string]bool{}
+	for _, execution := range local {
+		seen[execution.ID] = true
+	}
+	for id := range remoteByID {
+		if seen[id] {
+			continue
+		}
+		if execution, err := s.st.GetRobotExecution(id); err == nil && execution.RobotID == pilot.RobotID && execution.PilotInstanceID == pilotID {
+			local = append(local, execution)
+		}
+	}
 	recoverable := make([]store.RobotExecution, 0, len(remoteByID))
 	terminalCurrentExecutionID := ""
 	for index := range local {
+		if local[index].PilotInstanceID != pilotID {
+			continue
+		}
 		if local[index].Status != "completed" {
 			recovered, payload, restored, recoverErr := s.recoverPersistedExecutionTerminal(local[index])
 			if recoverErr != nil {
@@ -1455,6 +1496,14 @@ func (s *Service) Reconcile(pilotID string, remote []map[string]any) ([]store.Ro
 			terminalCurrentExecutionID = local[index].ID
 		}
 
+		if _, requested := remoteByID[local[index].ID]; requested && operatorStopConfirmed(local[index]) {
+			// Return only the exact owner's compact confirmation, never unrelated
+			// historical trajectories or terminal results.
+			item := local[index]
+			item.Input = nil
+			recoverable = append(recoverable, item)
+			continue
+		}
 		if !activeRobotStatus(local[index].Status) {
 			continue
 		}
@@ -1500,6 +1549,12 @@ func (s *Service) Reconcile(pilotID string, remote []map[string]any) ([]store.Ro
 	}
 
 	return recoverable, nil
+}
+
+func operatorStopConfirmed(execution store.RobotExecution) bool {
+	return execution.Result["confirmation_source"] == "operator" && execution.Result["safe"] == true &&
+		execution.Result["hold_confirmed"] == true && stringValue(execution.Result["confirmed_by"]) != "" &&
+		stringValue(execution.Result["confirmation_reason"]) != ""
 }
 
 func (s *Service) InstallSkill(pilotID, name, version string) error {

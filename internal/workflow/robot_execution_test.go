@@ -1447,3 +1447,102 @@ func TestRetryRobotAgentDecisionOnlyStartsDecisionRun(t *testing.T) {
 		t.Fatalf("重试决策未在 %s 内回复 Pilot", workflowEventWait)
 	}
 }
+
+func TestFailedSDKPhysicalExecutionWithStopEvidenceStopsWorkflow(t *testing.T) {
+	st, project, conversation, service, _, executor := newWorkflowFixture(t)
+	view, task, subTasks := prepareRunningRobotTask(t, st, project, conversation,
+		[]store.SubTaskDraft{{ID: "sub-held", Kind: "robot_skill", Goal: "抓取"}})
+	now := time.Now().UTC()
+	// SDK 业务失败、payload 缺失；独立停止证据随同一 Action 回执传入。
+	execution := store.RobotExecution{ID: "rex-failed-held", ProjectID: project.ID,
+		WorkflowID: view.Workflow.ID, TaskID: task.ID, SubtaskID: subTasks[0].ID,
+		RobotID: "r1pro-test", SkillName: "r1pro-navigate", SkillVersion: "0.4.0-alpha.4",
+		Status: "failed", Error: map[string]any{"code": "command_rejected"},
+		Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := st.SaveRobotExecution(execution); err != nil {
+		t.Fatal(err)
+	}
+	for sequence, event := range []struct {
+		kind    string
+		payload map[string]any
+	}{
+		{"action.started", map[string]any{"action_id": "policy", "physical": true, "physical_started": true, "execution_protocol": "sdk-task@1.0.0", "framework_task_id": "task-1", "ability_instance_id": "instance-1"}},
+		{"action.terminal", map[string]any{"action_id": "policy", "status": "failed", "execution_protocol": "sdk-task@1.0.0", "framework_task_id": "task-1", "ability_instance_id": "instance-1",
+			"stop_evidence": map[string]any{"confirmed": true, "reason": "new feedback confirms hold", "observed_at": map[string]any{"clock": "unix", "seconds": 1791879881, "nanoseconds": 880902767}},
+			"error":         map[string]any{"code": "command_rejected"}}},
+	} {
+		if err := st.AppendRobotExecutionEvent(store.RobotExecutionEvent{
+			ExecutionID: execution.ID, Sequence: int64(sequence + 1),
+			Type: event.kind, Payload: event.payload, CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.OnRobotExecutionChanged(context.Background(), execution,
+		"execution.failed", execution.Error); err != nil {
+		t.Fatal(err)
+	}
+	stoppedWorkflow, _ := st.GetWorkflow(view.Workflow.ID)
+	stoppedTask, _ := st.GetTask(task.ID)
+	stoppedSubTask, _ := st.GetSubTask(subTasks[0].ID)
+	if stoppedWorkflow.Status != store.WorkflowStatusStopped ||
+		stoppedTask.Status != store.TaskStatusStopped ||
+		stoppedSubTask.Status != store.TaskStatusStopped {
+		t.Fatalf("失败但已安全保持必须直接收敛 stopped: workflow=%+v task=%+v subtask=%+v",
+			stoppedWorkflow, stoppedTask, stoppedSubTask)
+	}
+	if stoppedSubTask.WaitingReason != "robot_execution_failed_but_held" {
+		t.Fatalf("收敛原因必须说明失败但已保持: %+v", stoppedSubTask)
+	}
+	select {
+	case replay := <-executor.started:
+		t.Fatalf("失败但已安全保持不得自动重放: %+v", replay)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSDKStopEvidenceRequiresExactPhysicalTaskAndCoversAllStarts(t *testing.T) {
+	st, _, _, service, _, _ := newWorkflowFixture(t)
+	var seq int64
+	appendEvent := func(kind, action, task, instance string, physical, confirmed bool) {
+		t.Helper()
+		seq++
+		payload := map[string]any{"action_id": action, "framework_task_id": task, "ability_instance_id": instance,
+			"execution_protocol": "sdk-task@1.0.0", "physical_started": physical, "status": "failed",
+			"stop_evidence": map[string]any{"confirmed": confirmed}, "result": map[string]any{"safe": true}}
+		if err := st.AppendRobotExecutionEvent(store.RobotExecutionEvent{ExecutionID: "rex-sdk", Sequence: seq, Type: kind, Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(want bool) {
+		t.Helper()
+		got, err := service.robotExecutionSafelyHeld("rex-sdk")
+		if err != nil || got != want {
+			t.Fatalf("at %d: got %v, want %v (%v)", seq, got, want, err)
+		}
+	}
+	appendEvent("action.started", "a", "ta", "ia", true, false)
+	appendEvent("action.terminal", "a", "other", "ia", true, true)
+	check(false)
+	appendEvent("action.terminal", "a", "ta", "other", true, true)
+	check(false)
+	appendEvent("action.started", "read", "tr", "ir", false, false)
+	appendEvent("action.terminal", "read", "tr", "ir", false, true)
+	check(false)
+	appendEvent("action.terminal", "a", "ta", "ia", true, true)
+	check(true)
+	appendEvent("action.started", "b", "tb", "ib", true, false)
+	check(false)
+	appendEvent("action.terminal", "a", "ta", "ia", true, true)
+	check(false)
+	appendEvent("action.terminal", "b", "tb", "ib", true, false)
+	check(false)
+	appendEvent("action.terminal", "b", "tb", "ib", true, true)
+	check(true)
+	appendEvent("action.started", "c", "tc", "ic", true, false)
+	appendEvent("action.started", "d", "td", "id", true, false)
+	appendEvent("action.terminal", "d", "td", "id", true, true)
+	check(false)
+	appendEvent("action.terminal", "c", "tc", "ic", true, true)
+	check(true)
+}

@@ -104,3 +104,74 @@ func TestSDKReadTaskNeedsNoPhysicalStopEvidence(t *testing.T) {
 		t.Fatalf("%+v %v", result, err)
 	}
 }
+
+func TestSDKFailureStopEvidenceSurvivesJournalAndActionEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/start") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"task_id": "original-task"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"task_id": "original-task", "status": "failed",
+			"error": map[string]any{"code": "command_rejected", "message": "尚未进入已配置的直立运输姿态"},
+			"stop_evidence": map[string]any{"confirmed": true, "reason": "feedback confirms hold",
+				"observed_at": map[string]any{"clock": "unix", "seconds": 1791879881, "nanoseconds": 880902767}},
+		})
+	}))
+	defer server.Close()
+	client := NewAbilityFrameworkClient(server.URL, []AbilityTaskCatalog{{InstanceID: "exact-instance", TaskTypes: map[string]int{"move": 0}}})
+	ref := ActionRef{Type: "r1pro.navigate.navigate", SchemaVersion: 1}
+	catalog := NewCatalog(RobotProfile{RobotID: "robot", Bindings: map[string]AbilityBinding{ref.Key(): {
+		Action: ref, InstanceID: "exact-instance", TaskName: "move", Physical: true, ExecutionProtocol: SDKTaskProtocol}}})
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "pilot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	journal, err := NewSQLiteStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(catalog, client, journal)
+	execution, err := runner.StartAction(context.Background(), ActionRequest{RobotID: "robot", SkillExecutionID: "skill", Key: "invoke", Action: ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	skills := NewMemorySkillExecutionStore()
+	_ = skills.SaveSkillExecution(SkillExecution{ID: "skill", RobotID: "robot"})
+	events := &recordingRuntimeEventSink{}
+	runtime := NewSkillRuntime(nil, catalog, runner, skills, WorkerSupervisor{}, nil, nil, events)
+	active := &activeSkill{actions: map[string]string{"invoke": execution.ID}}
+	payload, err := runtime.waitActionResult(context.Background(), "skill", active, execution.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "failed" || payload["physical_effect"] != "unknown" || payload["error_code"] != "command_rejected" {
+		t.Fatalf("failure or physical effects were misrepresented: %+v", payload)
+	}
+	persisted, err := journal.GetActionByID(execution.ID)
+	if err != nil || persisted.StopEvidence["confirmed"] != true || persisted.Result != nil {
+		t.Fatalf("evidence lost or business payload changed: %+v %v", persisted, err)
+	}
+	var terminal map[string]any
+	for _, e := range events.events {
+		if e.Event == "action.terminal" {
+			terminal = e.Fields
+		}
+	}
+	evidence, _ := terminal["stop_evidence"].(map[string]any)
+	if evidence["confirmed"] != true || evidence["observed_at"] == nil || terminal["framework_task_id"] != "original-task" || terminal["ability_instance_id"] != "exact-instance" || terminal["execution_protocol"] != SDKTaskProtocol {
+		t.Fatalf("Action receipt lost evidence or identity: %+v", terminal)
+	}
+}
+
+func TestSDKStopEvidenceCannotConfirmAnotherTask(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"task_id": "different-task", "status": "failed", "stop_evidence": map[string]any{"confirmed": true}})
+	}))
+	defer server.Close()
+	_, err := NewAbilityFrameworkClient(server.URL, nil).QuerySDKTask(context.Background(), "instance", "original-task", true)
+	if err == nil {
+		t.Fatal("accepted stop evidence belonging to another task")
+	}
+}

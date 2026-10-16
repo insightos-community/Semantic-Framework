@@ -66,7 +66,10 @@ func (c *AbilityFrameworkClient) QuerySDKTask(ctx context.Context, instance, id 
 	if raw.TaskID != id {
 		return AbilityExecution{}, errors.New("SDK returned another task identity")
 	}
-	result := AbilityExecution{Result: raw.Payload, Error: raw.Error}
+	// Evidence belongs to this exact SDK task, independently of the business
+	// payload (which is often absent on failure). Keep it through the journal
+	// and Action events instead of consuming it only as a local terminal gate.
+	result := AbilityExecution{Result: raw.Payload, Error: raw.Error, StopEvidence: raw.StopEvidence}
 	switch raw.Status {
 	case "running":
 		result.Status = "running"

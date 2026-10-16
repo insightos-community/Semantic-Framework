@@ -254,13 +254,14 @@ func safelyStoppedRobotExecution(execution store.RobotExecution) bool {
 	return safe
 }
 
-// robotExecutionSafelyHeld 从 Action 事实流读取物理安全保持证据。Ability 是
-// 物理状态的唯一权威：撤销执行后它显式 hold 并核对 in_hold，把 safe 证据写进
-// 该次 Action 的 result，随 action.terminal 事件持久化。这里按发生顺序重建
-// "最后一个物理事实"：每次 physical_started 的 action.started 都推翻此前的保持
-// 证明，只有其后的安全保持证明才重新成立。Skill 层的失败文案不参与判定。
+// robotExecutionSafelyHeld reads device evidence, never Skill error prose.
+// SDK evidence is scoped to one admitted physical Action and its exact task.
+// Every new physical start invalidates previous proof; delayed receipts cannot
+// confirm a different task, a read-only task, or another outstanding Action.
 func (s *Service) robotExecutionSafelyHeld(executionID string) (bool, error) {
 	held := false
+	started := map[string]map[string]any{}
+	pending := map[string]bool{}
 	var after int64
 	for {
 		events, err := s.st.ListRobotExecutionEvents(executionID, after, 1000)
@@ -269,18 +270,45 @@ func (s *Service) robotExecutionSafelyHeld(executionID string) (bool, error) {
 		}
 		for _, item := range events {
 			after = item.Sequence
+			id, _ := item.Payload["action_id"].(string)
 			switch item.Type {
 			case "action.started":
-				if started, _ := item.Payload["physical_started"].(bool); started {
+				started[id] = item.Payload
+				if physical, _ := item.Payload["physical_started"].(bool); physical {
+					pending[id] = true
 					held = false
 				}
 			case "action.terminal":
-				result, ok := item.Payload["result"].(map[string]any)
-				if !ok {
+				start := started[id]
+				if start["execution_protocol"] == "sdk-task@1.0.0" || item.Payload["execution_protocol"] == "sdk-task@1.0.0" {
+					if !sameSDKPhysicalTask(start, item.Payload) {
+						continue
+					}
+					evidence, _ := item.Payload["stop_evidence"].(map[string]any)
+					status, _ := item.Payload["status"].(string)
+					if evidence["confirmed"] == true && (status == "failed" || status == "succeeded" || status == "stopped") {
+						delete(pending, id)
+						held = len(pending) == 0
+					} else {
+						pending[id] = true
+						held = false
+					}
 					continue
 				}
+				// Preserve the existing non-SDK hold contract. It cannot replace
+				// missing evidence for an SDK task admitted in the same execution.
+				result, _ := item.Payload["result"].(map[string]any)
 				if safe, exists := result["safe"].(bool); exists {
 					held = safe
+					if safe {
+						for actionID := range pending {
+							if started[actionID]["execution_protocol"] == "sdk-task@1.0.0" {
+								held = false
+							} else {
+								delete(pending, actionID)
+							}
+						}
+					}
 				}
 			}
 		}
@@ -289,6 +317,19 @@ func (s *Service) robotExecutionSafelyHeld(executionID string) (bool, error) {
 		}
 	}
 	return held, nil
+}
+
+func sameSDKPhysicalTask(start, terminal map[string]any) bool {
+	if start["physical_started"] != true || start["execution_protocol"] != "sdk-task@1.0.0" || terminal["execution_protocol"] != "sdk-task@1.0.0" {
+		return false
+	}
+	for _, field := range []string{"action_id", "ability_instance_id", "framework_task_id"} {
+		value, ok := start[field].(string)
+		if !ok || value == "" || terminal[field] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) launchRobotAgentDecision(parent context.Context, task store.Task,

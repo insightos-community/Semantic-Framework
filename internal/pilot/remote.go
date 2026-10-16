@@ -252,16 +252,29 @@ func (c *RemoteClient) handleCommand(ctx context.Context, command serverCommand)
 	}
 	switch command.Type {
 	case "reconcile.request":
-		items, err := c.executions.ListRecoverableSkillExecutions()
+		snapshots, err := c.runtime.ReconciliationSnapshots()
 		if err != nil {
 			return err
 		}
-		snapshots := make([]map[string]any, 0, len(items))
-		for _, item := range items {
-			snapshots = append(snapshots, map[string]any{"execution_id": item.ID, "status": item.Status, "checkpoint": item.Checkpoint, "feedback_cursors": item.FeedbackCursors})
-		}
 		return c.write(map[string]any{"type": "reconcile", "executions": snapshots})
 	case "reconcile.result":
+		var response struct {
+			Executions []store.RobotExecution `json:"executions"`
+		}
+		if err := json.Unmarshal(command.Payload, &response); err != nil {
+			return err
+		}
+		for _, execution := range response.Executions {
+			if execution.Status != "stopped" || execution.Result["confirmation_source"] != "operator" {
+				continue
+			}
+			if execution.RobotID != c.config.Pilot.RobotID || execution.PilotInstanceID != c.config.Pilot.PilotInstanceID {
+				return ErrManualCheckRequired
+			}
+			if err := c.runtime.ConfirmOperatorStop(execution.ID, execution.RobotID, execution.Result); err != nil {
+				return err
+			}
+		}
 		return nil
 	case "execution.start":
 		return c.startExecution(ctx, payload)

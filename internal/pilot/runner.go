@@ -233,13 +233,30 @@ func (r *Runner) physicalOwner(robotID string) string {
 }
 
 // ConfirmInterrupted 只供人工或设备侧确认现场后调用；确认前 Robot 锁保持占用。
-func (r *Runner) ConfirmInterrupted(executionID string) (ActionExecution, error) {
+func (r *Runner) ConfirmInterrupted(executionID string, confirmations ...map[string]any) (ActionExecution, error) {
 	execution, err := r.journal.GetActionByID(executionID)
 	if err != nil {
 		return ActionExecution{}, ErrExecutionNotFound
 	}
 	if execution.Status != ActionInterrupted {
 		return ActionExecution{}, ErrManualCheckRequired
+	}
+	confirmation := map[string]any{"confirmation_source": "operator"}
+	if len(confirmations) > 0 {
+		confirmation = cloneMap(confirmations[0])
+	}
+	confirmation["confirmed"] = true
+	execution.StopEvidence = confirmation
+	if execution.Result == nil {
+		execution.Result = map[string]any{}
+	}
+	execution.Result["pre_stop_error"] = cloneMap(execution.Error)
+	execution.Error = nil
+	execution.Status = ActionStopped
+	execution.UpdatedAt = r.now()
+	// Persist before unlocking: a Pilot reboot must not resurrect this owner.
+	if err := r.journal.SaveAction(execution); err != nil {
+		return ActionExecution{}, err
 	}
 	r.releasePhysical(execution.RobotID, execution.ID)
 	return execution, nil
@@ -251,6 +268,7 @@ func (r *Runner) applyAbilityState(execution ActionExecution, state AbilityExecu
 	execution.Observations = cloneMaps(state.Observations)
 	execution.Result = cloneMap(state.Result)
 	execution.Error = cloneMap(state.Error)
+	execution.StopEvidence = cloneMap(state.StopEvidence)
 	execution.UpdatedAt = r.now()
 	_ = r.journal.SaveAction(execution)
 	if actionTerminal(execution.Status) && execution.Status != ActionInterrupted {
@@ -384,6 +402,7 @@ func cloneActionExecution(source ActionExecution) ActionExecution {
 	result.Observations = cloneMaps(source.Observations)
 	result.Result = cloneMap(source.Result)
 	result.Error = cloneMap(source.Error)
+	result.StopEvidence = cloneMap(source.StopEvidence)
 	return result
 }
 

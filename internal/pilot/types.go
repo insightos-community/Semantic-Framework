@@ -95,6 +95,7 @@ type AbilityExecution struct {
 	Observations []map[string]any  `json:"observations"`
 	Result       map[string]any    `json:"result"`
 	Error        map[string]any    `json:"error"`
+	StopEvidence map[string]any    `json:"stop_evidence,omitempty"`
 }
 
 // AbilityClient 调用精确 AbilityFramework 实例；实现不得按名称回退选择其他实例。
@@ -136,6 +137,7 @@ type ActionExecution struct {
 	Observations      []map[string]any
 	Result            map[string]any
 	Error             map[string]any
+	StopEvidence      map[string]any
 	StartedAt         time.Time
 	UpdatedAt         time.Time
 }
