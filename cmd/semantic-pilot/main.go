@@ -155,9 +155,14 @@ func runPermanentContext(ctx context.Context, profilePath, serverWS, serverHTTP,
 	artifacts := pilot.NewArtifactStore(filepath.Join(dataDir, "artifacts"), serverHTTP)
 	artifacts.AbilityExchangeDirectory = os.Getenv("SEMANTIC_ABILITY_ARTIFACT_ROOT")
 	heartbeat := time.Duration(deployment.Pilot.HeartbeatIntervalSecond) * time.Second
+	var mapSync *pilot.MapSynchronizer
+	if deployment.MapSync.Enabled {
+		mapSync = &pilot.MapSynchronizer{Config: deployment.MapSync, ServerURL: serverHTTP, Credential: accessToken,
+			OnError: func(err error) { logger.WithError(err).Warn("Pilot map synchronization pending") }}
+	}
 	remote := pilot.NewRemoteClient(pilot.RemoteClientConfig{
 		ServerWebSocketURL: serverWS, ServerHTTPBaseURL: serverHTTP, AccessToken: accessToken,
-		HeartbeatInterval: heartbeat, AbilityStatus: discovery.Snapshot,
+		HeartbeatInterval: heartbeat, AbilityStatus: discovery.Snapshot, MapSync: mapSync,
 		Pilot: store.RobotPilot{PilotInstanceID: pilotID, RobotID: deployment.Robot.ID,
 			DisplayName: deployment.Robot.DisplayName, RobotModel: deployment.Robot.Model,
 			Backend: deployment.Robot.Backend, PilotVersion: pilotVersion, Status: "connecting",

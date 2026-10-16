@@ -408,6 +408,25 @@ stop_actions:
 	if _, err = svc.resolveRobotTaskAssignment(store.Workflow{ApprovedScope: json.RawMessage(`{"robot_ids":["another-robot"]}`)}, store.Task{RequiredRole: "robot"}); !errors.Is(err, workflow.ErrTaskWaitingResource) {
 		t.Fatalf("批准范围外的在线 Robot 不得被分配: %v", err)
 	}
+	membershipProject, err := fx.st.EnsureDefaultProject("usr-robot-execution-context")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.resolveRobotTaskAssignment(store.Workflow{ProjectID: membershipProject.ID}, store.Task{RequiredRole: "robot"}); !errors.Is(err, workflow.ErrTaskWaitingResource) {
+		t.Fatalf("unadded robot must not be scheduled: %v", err)
+	}
+	if err = fx.st.SetProjectRobot(membershipProject.ID, pilot.RobotID, true); err != nil {
+		t.Fatal(err)
+	}
+	if assignment, err = svc.resolveRobotTaskAssignment(store.Workflow{ProjectID: membershipProject.ID}, store.Task{RequiredRole: "robot"}); err != nil || assignment.RobotID != pilot.RobotID {
+		t.Fatalf("added robot not schedulable: %+v %v", assignment, err)
+	}
+	if err = fx.st.SetProjectRobot(membershipProject.ID, pilot.RobotID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.resolveRobotTaskAssignment(store.Workflow{ProjectID: membershipProject.ID}, store.Task{RequiredRole: "robot"}); !errors.Is(err, workflow.ErrTaskWaitingResource) {
+		t.Fatalf("removing last member enabled all robots: %v", err)
+	}
 	catalog, err := svc.robotTaskPlanningCatalog(store.Workflow{ApprovedScope: json.RawMessage(`{"allowed_skills":["grasp-object"]}`)}, store.Task{
 		ID: "task-move", RequiredRole: "robot",
 		AssignedRobotID: "r1pro-fake-02",
@@ -804,7 +823,7 @@ func TestPlanningToolPolicyFailsClosedForSideEffects(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{planningSkillTool, "map.query", "interaction.ask"} {
+	for _, name := range []string{planningSkillTool, "map.query", "robot.list", "interaction.ask"} {
 		t.Run("allow "+name, func(t *testing.T) {
 			called := false
 			_, err := (planningToolPolicy{}).WrapToolCall(context.Background(),

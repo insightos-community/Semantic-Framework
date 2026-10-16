@@ -72,9 +72,10 @@ type WorkerProcess struct {
 	nextID    atomic.Uint64
 	serveOnce sync.Once
 
-	requestQueued   atomic.Uint64
-	requestHandled  atomic.Uint64
-	requestProgress chan struct{}
+	requestQueued     atomic.Uint64
+	requestHandled    atomic.Uint64
+	requestProgressMu sync.Mutex
+	requestProgress   chan struct{}
 }
 
 func (s WorkerSupervisor) Start(ctx context.Context, definition SkillDefinition) (*WorkerProcess, error) {
@@ -115,7 +116,7 @@ func (s WorkerSupervisor) Start(ctx context.Context, definition SkillDefinition)
 		pending:         make(map[string]chan rpcMessage),
 		requests:        make(chan rpcMessage, 32),
 		done:            make(chan struct{}),
-		requestProgress: make(chan struct{}, 1),
+		requestProgress: make(chan struct{}),
 	}
 	go process.readStdout(stdout)
 	go process.readStderr(stderr, s.OnStderrLine)
@@ -347,29 +348,41 @@ func (p *WorkerProcess) markRequestHandled(sequence uint64) {
 	if sequence == 0 {
 		return
 	}
+	p.requestProgressMu.Lock()
+	defer p.requestProgressMu.Unlock()
 	p.requestHandled.Store(sequence)
+	// skill.run and skill.stop may both await the same notification barrier.
+	// Broadcast progress to every waiter; a buffered send wakes only one and
+	// can leave Stop waiting forever after the final notification is persisted.
 	if p.requestProgress != nil {
-		select {
-		case p.requestProgress <- struct{}{}:
-		default:
-		}
+		close(p.requestProgress)
 	}
+	p.requestProgress = make(chan struct{})
 }
 
 func (p *WorkerProcess) waitRequestsHandled(ctx context.Context, barrier uint64) error {
 	if barrier == 0 {
 		return nil
 	}
-	for p.requestHandled.Load() < barrier {
+	for {
+		p.requestProgressMu.Lock()
+		if p.requestHandled.Load() >= barrier {
+			p.requestProgressMu.Unlock()
+			return nil
+		}
+		if p.requestProgress == nil {
+			p.requestProgress = make(chan struct{})
+		}
+		progress := p.requestProgress
+		p.requestProgressMu.Unlock()
 		select {
-		case <-p.requestProgress:
+		case <-progress:
 		case <-p.done:
 			return p.exitError()
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
-	return nil
 }
 
 func (p *WorkerProcess) readStderr(reader io.Reader, sink func(string)) {

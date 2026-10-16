@@ -79,7 +79,7 @@ func (j *MemoryActionJournal) ListActiveActions() ([]ActionExecution, error) {
 	defer j.mu.RUnlock()
 	result := make([]ActionExecution, 0)
 	for _, item := range j.byID {
-		if !actionTerminal(item.Status) {
+		if !actionTerminal(item.Status) || (item.ExecutionProtocol == SDKTaskProtocol && item.Physical && item.Status == ActionInterrupted) {
 			result = append(result, cloneActionExecution(item))
 		}
 	}

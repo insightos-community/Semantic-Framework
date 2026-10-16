@@ -113,6 +113,48 @@ func TestWorkerResponseWaitsForPreviouslyReadRequests(t *testing.T) {
 	}
 }
 
+type barrierWaitContext struct {
+	context.Context
+	entered chan struct{}
+}
+
+func (c barrierWaitContext) Done() <-chan struct{} {
+	c.entered <- struct{}{}
+	return c.Context.Done()
+}
+
+func TestFinalWorkerNotificationWakesRunAndStopWaiters(t *testing.T) {
+	process := &WorkerProcess{done: make(chan struct{}), requestProgress: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	entered := make(chan struct{}, 4)
+	finished := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			finished <- process.waitRequestsHandled(barrierWaitContext{ctx, entered}, 1)
+		}()
+	}
+	// Both RPC responses are waiting before the final stop.outcome is persisted.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("RPC waiter did not enter the barrier")
+		}
+	}
+	process.markRequestHandled(1)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatalf("RPC waiter failed: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("final notification did not wake both run and stop")
+		}
+	}
+}
+
 func TestWorkerStdoutEOFWithoutPendingCallIsNormal(t *testing.T) {
 	process := &WorkerProcess{
 		pending:  make(map[string]chan rpcMessage),

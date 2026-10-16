@@ -344,9 +344,26 @@ func (r *SkillRuntime) Stop(ctx context.Context, executionID, source, reason, mo
 		current = append(current, actionID)
 	}
 	active.mu.Unlock()
+	if active.definition.Runtime.StopStrategy == "cancel_actions" {
+		pending, err := r.runner.journal.ListActiveActions()
+		if err != nil {
+			r.interruptSkill(executionID, "ACTION_JOURNAL_UNAVAILABLE", err.Error())
+			return execution, err
+		}
+		seen := map[string]bool{}
+		for _, id := range current {
+			seen[id] = true
+		}
+		for _, action := range pending {
+			if action.SkillExecutionID == executionID && !seen[action.ID] {
+				current = append(current, action.ID)
+				seen[action.ID] = true
+			}
+		}
+	}
 	worker := active.currentWorker()
 	for _, actionID := range current {
-		if _, stopErr := r.runner.Stop(ctx, actionID, reason); stopErr != nil {
+		if stopErr := r.stopAndConfirmAction(ctx, actionID, reason, active.definition.Runtime.StopStrategy == "cancel_actions"); stopErr != nil {
 			execution.Status = SkillInterrupted
 			execution.Error = map[string]any{"code": "ABILITY_STOP_UNCONFIRMED", "message": stopErr.Error()}
 			execution.UpdatedAt = r.now()
@@ -1150,3 +1167,31 @@ func number(value any) float64 {
 	}
 }
 func stringValue(value any) string { result, _ := value.(string); return result }
+
+// cancel_actions delegates physical hold to the existing task/HAL stop contract.
+// A cancellation acknowledgement alone never authorizes Worker cleanup.
+func (r *SkillRuntime) stopAndConfirmAction(ctx context.Context, id, reason string, confirm bool) error {
+	state, err := r.runner.Stop(ctx, id, reason)
+	if err != nil || !confirm {
+		return err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	for {
+		if state.Status == ActionInterrupted {
+			return ErrManualCheckRequired
+		}
+		if actionTerminal(state.Status) {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return waitCtx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+		state, err = r.runner.Refresh(waitCtx, id)
+		if err != nil {
+			return err
+		}
+	}
+}

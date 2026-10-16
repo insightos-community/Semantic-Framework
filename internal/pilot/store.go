@@ -233,7 +233,7 @@ func (s *SQLiteStore) ListActiveActions() ([]ActionExecution, error) {
 		if err := json.Unmarshal(body, &item); err != nil {
 			return nil, err
 		}
-		if !actionTerminal(item.Status) {
+		if !actionTerminal(item.Status) || (item.ExecutionProtocol == SDKTaskProtocol && item.Physical && item.Status == ActionInterrupted) {
 			result = append(result, item)
 		}
 	}

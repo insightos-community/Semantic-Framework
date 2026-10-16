@@ -53,6 +53,10 @@ func NewRouter(logger *log.Logger, authSvc *auth.Service, chatH *handlers.ChatHa
 	// Artifact；WebSocket 端口只承载控制事件。把传输入口放在统一 HTTP
 	// 网关后，单机双端口部署和反向代理部署都会得到相同地址语义。
 	r.HandleFunc("/pilot/v1/transfers/*", robotsH.HandlePilotTransfer)
+	r.Post("/pilot/v1/map-sync", robotsH.HandlePilotMap)
+	r.Post("/pilot/v1/robot-state", robotsH.HandlePilotTwin)
+	r.Head("/pilot/v1/map-assets/{hash}", robotsH.HandlePilotMapAsset)
+	r.Put("/pilot/v1/map-assets/{hash}", robotsH.HandlePilotMapAsset)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// 公开组：路径命中 auth 白名单，中间件直接放行。
@@ -165,6 +169,9 @@ func NewRouter(logger *log.Logger, authSvc *auth.Service, chatH *handlers.ChatHa
 			r.Get("/{id}/runs", projectsH.HandleListRuns)
 			r.Get("/{id}/studio/snapshot", projectsH.HandleStudioSnapshotV030)
 			r.Get("/{id}/robot-executions", robotsH.HandleListProjectExecutions)
+			r.Get("/{id}/robots", robotsH.HandleProjectRobots)
+			r.Put("/{id}/robots/{robot_id}", robotsH.HandleProjectRobots)
+			r.Delete("/{id}/robots/{robot_id}", robotsH.HandleProjectRobots)
 			if simulationH != nil {
 				r.Route("/{id}/simulation", func(r chi.Router) {
 					r.Post("/runtime/ensure", simulationH.HandleEnsureRuntime)
@@ -248,6 +255,10 @@ func NewRouter(logger *log.Logger, authSvc *auth.Service, chatH *handlers.ChatHa
 			// 创建后只暴露运行控制，旧的直接 PATCH/feedback/confirm 入口下线。
 			r.Post("/{id}/workflows/{workflow_id}/{action:pause|resume|stop|retry-decision|confirm-stop}",
 				projectsH.HandleWorkflowAction)
+			r.Get("/{id}/maps/visual-assets/{hash}.glb", robotsH.HandleProjectMapAsset)
+			r.Get("/{id}/maps/real_map/sources", robotsH.HandleMapSources)
+			r.Get("/{id}/maps/real_map/robot-state", robotsH.HandleProjectTwin)
+			r.Put("/{id}/maps/real_map/source", robotsH.HandleSelectMapSource)
 			r.Get("/{id}/maps/{map_id}", projectsH.HandleGetSemanticMap)
 			r.Post("/{id}/maps/{map_id}/query", projectsH.HandleQuerySemanticMap)
 			r.Post("/{id}/maps/{map_id}/generations", projectsH.HandleCreateMapGeneration)

@@ -43,13 +43,17 @@ type ActionRef struct {
 
 func (r ActionRef) Key() string { return fmt.Sprintf("%s@%d", r.Type, r.SchemaVersion) }
 
-// AbilityBinding 把某台 Robot 的 Action 精确绑定到一个 Ability 实例和 Task。
+// SDKTaskProtocol uses the existing asynchronous task endpoints.
+const SDKTaskProtocol = "sdk-task@1.0.0"
+
+// AbilityBinding binds an Action to one exact AF instance and business task.
 type AbilityBinding struct {
-	Action      ActionRef
-	AbilityName string
-	TaskName    string
-	InstanceID  string
-	Physical    bool
+	ExecutionProtocol string
+	Action            ActionRef
+	AbilityName       string
+	TaskName          string
+	InstanceID        string
+	Physical          bool
 }
 
 type RobotProfile struct {
@@ -113,26 +117,27 @@ const (
 )
 
 type ActionExecution struct {
-	ID               string
-	SkillExecutionID string
-	Key              string
-	RequestJSON      string
-	RobotID          string
-	Action           ActionRef
-	AbilityName      string
-	TaskName         string
-	InstanceID       string
-	InvocationID     string
-	FrameworkTaskID  string
-	Physical         bool
-	Status           ActionStatus
-	FeedbackCursor   int64
-	Feedback         []AbilityFeedback
-	Observations     []map[string]any
-	Result           map[string]any
-	Error            map[string]any
-	StartedAt        time.Time
-	UpdatedAt        time.Time
+	ExecutionProtocol string
+	ID                string
+	SkillExecutionID  string
+	Key               string
+	RequestJSON       string
+	RobotID           string
+	Action            ActionRef
+	AbilityName       string
+	TaskName          string
+	InstanceID        string
+	InvocationID      string
+	FrameworkTaskID   string
+	Physical          bool
+	Status            ActionStatus
+	FeedbackCursor    int64
+	Feedback          []AbilityFeedback
+	Observations      []map[string]any
+	Result            map[string]any
+	Error             map[string]any
+	StartedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type SkillExecutionStatus string

@@ -26,6 +26,7 @@ import (
 )
 
 type SkillRuntimeSpec struct {
+	StopStrategy   string            `yaml:"stop_strategy"`
 	APIVersion     int               `yaml:"api_version"`
 	Python         string            `yaml:"python"`
 	Entrypoint     string            `yaml:"entrypoint"`
@@ -172,7 +173,10 @@ func loadSkillDefinition(directory string) (SkillDefinition, error) {
 			return SkillDefinition{}, err
 		}
 	}
-	if len(definition.RequiredActions) == 0 || len(definition.StopActions) == 0 {
+	if definition.Runtime.StopStrategy != "" && definition.Runtime.StopStrategy != "cancel_actions" {
+		return SkillDefinition{}, fmt.Errorf("unsupported stop_strategy")
+	}
+	if len(definition.RequiredActions) == 0 || (len(definition.StopActions) == 0 && definition.Runtime.StopStrategy != "cancel_actions") {
 		return SkillDefinition{}, fmt.Errorf("required_actions and stop_actions cannot be empty")
 	}
 	seen := make(map[string]struct{})

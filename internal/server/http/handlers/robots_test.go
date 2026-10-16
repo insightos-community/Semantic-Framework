@@ -52,6 +52,9 @@ func newRobotHandlerTest(t *testing.T) (http.Handler, *store.Store, *robotdomain
 	router.Get("/api/v1/devices/{robot_id}", handler.HandleGetDevice)
 	router.Get("/api/v1/robot-executions/{execution_id}", handler.HandleGetExecution)
 	router.Get("/api/v1/projects/{id}/robot-executions", handler.HandleListProjectExecutions)
+	router.Get("/api/v1/projects/{id}/robots", handler.HandleProjectRobots)
+	router.Put("/api/v1/projects/{id}/robots/{robot_id}", handler.HandleProjectRobots)
+	router.Delete("/api/v1/projects/{id}/robots/{robot_id}", handler.HandleProjectRobots)
 	router.Post("/api/v1/projects/{id}/robots/{robot_id}/skill-executions", handler.HandleStartSkillDebug)
 	router.Post("/api/v1/devices/{robot_id}/stop", handler.HandleStopDevice)
 	router.Route("/api/v1/robot-skills", func(r chi.Router) {
@@ -355,5 +358,42 @@ func writeRobotSkillHTTPArchive(t *testing.T, target string, files map[string]st
 	}
 	if err := output.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProjectRobotHTTPSelectionIsOwnedAndIdempotent(t *testing.T) {
+	router, st, service, _ := newRobotHandlerTest(t)
+	project, err := st.CreateProject("user-devices", "Robot membership")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment, err := service.CreatePilotEnrollment("user-devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = service.ClaimPilotEnrollment(enrollment.Code, "catalog-pilot"); err != nil {
+		t.Fatal(err)
+	}
+	_, disconnect, err := service.Connect(store.RobotPilot{PilotInstanceID: "catalog-pilot", RobotID: "catalog-robot", Backend: "real", RobotModel: "R1PRO"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disconnect()
+	url := "/api/v1/projects/" + project.ID + "/robots"
+	if code, _ := requestRobotJSON(t, router, http.MethodGet, url, "foreign", nil); code != 404 {
+		t.Fatalf("foreign read: %d", code)
+	}
+	for range 2 {
+		code, body := requestRobotJSON(t, router, http.MethodPut, url+"/catalog-robot", "user-devices", nil)
+		if code != 200 || len(body["robots"].([]any)) != 1 {
+			t.Fatalf("add failed: %d %+v", code, body)
+		}
+	}
+	if code, _ := requestRobotJSON(t, router, http.MethodDelete, url+"/catalog-robot", "foreign", nil); code != 404 {
+		t.Fatalf("foreign delete: %d", code)
+	}
+	code, body := requestRobotJSON(t, router, http.MethodDelete, url+"/catalog-robot", "user-devices", nil)
+	if code != 200 || len(body["robots"].([]any)) != 0 {
+		t.Fatalf("remove failed: %d %+v", code, body)
 	}
 }

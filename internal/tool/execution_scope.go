@@ -79,7 +79,7 @@ type ExecutionScope struct {
 // Filesystem 的四个只读工具由 kernel policy 校验，不经过本执行器。
 func PlanningToolAllowed(name string) bool {
 	return strings.HasPrefix(name, "system.") || name == "artifact.get" ||
-		name == "artifact.list" || name == "map.query" || name == "interaction.ask"
+		name == "artifact.list" || name == "map.query" || name == "robot.list" || name == "interaction.ask"
 }
 
 // ConversationPlanToolAllowed 比独立 Planning Run 额外允许 Proposal 的提交。

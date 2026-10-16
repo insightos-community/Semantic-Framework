@@ -44,6 +44,7 @@ type SimulationProjectStore interface {
 	SetProjectRuntimePreference(string, string, string, string) (store.Project, error)
 	AddProjectSceneReference(store.ProjectSceneReference) (store.ProjectSceneReference, error)
 	ListProjectSceneReferences(string) ([]store.ProjectSceneReference, error)
+	GetProjectRealScene(string) (*store.ProjectRealScene, error)
 	GetProjectSceneReference(string, string) (store.ProjectSceneReference, error)
 	RemoveProjectSceneReference(string, string) error
 }

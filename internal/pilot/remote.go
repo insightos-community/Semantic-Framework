@@ -35,6 +35,7 @@ import (
 const pilotServerReadLimit = 2 << 20
 
 type RemoteClientConfig struct {
+	MapSync            *MapSynchronizer
 	ServerWebSocketURL string
 	ServerHTTPBaseURL  string
 	AccessToken        string
@@ -172,6 +173,9 @@ func (c *RemoteClient) runConnection(ctx context.Context) error {
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go c.heartbeatLoop(heartbeatCtx)
+	if c.config.MapSync != nil {
+		go c.config.MapSync.Run(heartbeatCtx)
+	}
 	for {
 		kind, data, err := conn.Read(ctx)
 		if err != nil {

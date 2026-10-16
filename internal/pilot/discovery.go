@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -36,15 +37,18 @@ import (
 	"insightos.cn/semantic-framework/pkg/log"
 )
 
-// RobotDeployment 是 Pilot、七类 Ability 与 Robot SDK 共用的一份部署配置。
+// RobotDeployment 描述 Pilot 连接的机器人、现有能力与 Skill。
 // Ability 的 CR 只引用这份文件，不再逐个保存 Robot endpoint。
 type RobotDeployment struct {
-	APIVersion int `yaml:"api_version"`
+	MapSync    MapSyncConfig `yaml:"map_sync"`
+	APIVersion int           `yaml:"api_version"`
 	Robot      struct {
-		ID          string `yaml:"id"`
-		DisplayName string `yaml:"display_name"`
-		Model       string `yaml:"model"`
-		Backend     string `yaml:"backend"`
+		ID          string         `yaml:"id"`
+		DisplayName string         `yaml:"display_name"`
+		Model       string         `yaml:"model"`
+		Backend     string         `yaml:"backend"`
+		ProfilePath string         `yaml:"profile_path"`
+		Profile     map[string]any `yaml:"-"`
 		SDK         struct {
 			Package         string            `yaml:"package"`
 			Endpoint        string            `yaml:"endpoint"`
@@ -118,6 +122,27 @@ func LoadRobotDeployment(path string) (RobotDeployment, error) {
 	if _, err := url.ParseRequestURI(result.AbilityFramework.Endpoint); err != nil {
 		return result, fmt.Errorf("RobotDeployment ability_framework.endpoint 无效: %w", err)
 	}
+	if result.Robot.ProfilePath != "" {
+		p := result.Robot.ProfilePath
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(filepath.Dir(path), p)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return result, err
+		}
+		if err := json.Unmarshal(data, &result.Robot.Profile); err != nil {
+			return result, err
+		}
+	}
+	if result.MapSync.Enabled {
+		if result.Robot.Backend != "real" || result.MapSync.ConsoleTokenFile == "" {
+			return result, errors.New("map_sync requires real robot and console_token_file")
+		}
+		if _, err := url.ParseRequestURI(result.MapSync.ConsoleURL); err != nil {
+			return result, fmt.Errorf("invalid map_sync console_url: %w", err)
+		}
+	}
 	// 同一主机启动多台仿真 Robot 时，每个实例可以覆盖自己的 SDK Endpoint。
 	// 覆盖只改变进程内的有效配置，不要求逐个修改七份 Ability CR。
 	if endpoint := strings.TrimSpace(os.Getenv("SEMANTIC_ROBOT_SDK_ENDPOINT")); endpoint != "" {
@@ -130,6 +155,13 @@ func LoadRobotDeployment(path string) (RobotDeployment, error) {
 // 模型路径等进程内路径不会下发给浏览器；连接 Endpoint、Provider、坐标系与
 // 安全上限保留，便于判断当前 Robot 实际使用了哪套后端配置。
 func (d RobotDeployment) DeviceConfiguration() map[string]any {
+	serviceURL := ""
+	if endpoint, err := url.Parse(d.MapSync.ConsoleURL); err == nil && endpoint.Host != "" {
+		endpoint.User = nil
+		endpoint.RawQuery = ""
+		endpoint.Fragment = ""
+		serviceURL = endpoint.String()
+	}
 	return map[string]any{
 		"sdk": map[string]any{
 			"package": d.Robot.SDK.Package, "endpoint": d.Robot.SDK.Endpoint,
@@ -138,10 +170,11 @@ func (d RobotDeployment) DeviceConfiguration() map[string]any {
 			"scene_instance_id": d.Robot.SDK.SceneInstanceID,
 			"providers":         d.Robot.SDK.Providers, "options": d.Robot.SDK.Options,
 		},
-		"frames": d.Robot.Frames, "tools": d.Robot.Tools,
+		"frames": d.Robot.Frames, "tools": d.Robot.Tools, "profile": d.Robot.Profile,
 		"kinematics": d.Robot.Kinematics, "safety": d.Robot.Safety,
 		"ability_framework": map[string]any{"managed_by_instance": d.AbilityFramework.ManagedByInstance},
 		"pilot":             map[string]any{"allow_ability_debug": d.Pilot.AllowAbilityDebug},
+		"map_sync":          map[string]any{"enabled": d.MapSync.Enabled, "project_id": d.MapSync.ProjectID, "service_url": serviceURL},
 	}
 }
 
@@ -161,21 +194,23 @@ type abilityHeartbeat struct {
 }
 
 type abilityManifest struct {
-	Schema struct {
+	ExecutionProtocol string `json:"executionProtocol"`
+	Schema            struct {
 		Config struct {
 			OpenAPIV3Schema map[string]any `json:"openAPIV3Schema"`
 		} `json:"config"`
 	} `json:"schema"`
 	Tasks []struct {
-		TaskType      int              `json:"taskType"`
-		TaskName      string           `json:"taskName"`
-		AbilityRole   string           `json:"abilityRole"`
-		ActionType    string           `json:"actionType"`
-		SchemaVersion int              `json:"schemaVersion"`
-		Physical      bool             `json:"physical"`
-		InputModel    string           `json:"inputModel"`
-		InputFields   []map[string]any `json:"inputFields"`
-		Returns       []map[string]any `json:"returns"`
+		ExecutionProtocol string           `json:"executionProtocol"`
+		TaskType          int              `json:"taskType"`
+		TaskName          string           `json:"taskName"`
+		AbilityRole       string           `json:"abilityRole"`
+		ActionType        string           `json:"actionType"`
+		SchemaVersion     int              `json:"schemaVersion"`
+		Physical          bool             `json:"physical"`
+		InputModel        string           `json:"inputModel"`
+		InputFields       []map[string]any `json:"inputFields"`
+		Returns           []map[string]any `json:"returns"`
 	} `json:"tasks"`
 }
 
@@ -280,12 +315,21 @@ func (d *AbilityFrameworkDiscovery) Refresh(ctx context.Context) error {
 			item.errorText = err.Error()
 		} else {
 			item.manifest = manifest
+			if manifest.ExecutionProtocol != "" && manifest.ExecutionProtocol != SDKTaskProtocol {
+				item.errorText = "unsupported executionProtocol: " + manifest.ExecutionProtocol
+			}
 			// 新版 AbilityFramework 把 Task 定义保存在包的 Manifest 中，实例
 			// CR 只保存部署配置。Pilot 必须按 heartbeat 中的精确 Ability
 			// 名称和版本读取 Manifest，不能再从 CR 猜测 Task 编号。
 			item.tasks = make(map[string]int, len(manifest.Tasks))
 			actionTypes := make(map[string]struct{})
 			for _, task := range manifest.Tasks {
+				if task.ExecutionProtocol != "" {
+					if task.ExecutionProtocol != SDKTaskProtocol || (item.manifest.ExecutionProtocol != "" && item.manifest.ExecutionProtocol != task.ExecutionProtocol) {
+						item.errorText = "unsupported or mixed execution protocol"
+					}
+					item.manifest.ExecutionProtocol = task.ExecutionProtocol
+				}
 				if task.TaskName != "" {
 					item.tasks[task.TaskName] = task.TaskType
 				}
@@ -336,13 +380,16 @@ func (d *AbilityFrameworkDiscovery) Refresh(ctx context.Context) error {
 			continue
 		}
 		items[selected].selected = true
-		complete := items[selected].errorText == "" && hasTask(items[selected].tasks, "GetExecution") && hasTask(items[selected].tasks, "StopExecution")
+		if items[selected].errorText != "" {
+			continue
+		}
+		complete := items[selected].errorText == "" && (items[selected].manifest.ExecutionProtocol == SDKTaskProtocol || (hasTask(items[selected].tasks, "GetExecution") && hasTask(items[selected].tasks, "StopExecution")))
 		for _, action := range items[selected].actions {
 			if !hasTask(items[selected].tasks, action.TaskName) {
 				complete = false
 				continue
 			}
-			binding := AbilityBinding{Action: ActionRef{Type: action.ActionType, SchemaVersion: action.SchemaVersion},
+			binding := AbilityBinding{ExecutionProtocol: items[selected].manifest.ExecutionProtocol, Action: ActionRef{Type: action.ActionType, SchemaVersion: action.SchemaVersion},
 				AbilityName: items[selected].heartbeat.AbilityName, TaskName: action.TaskName,
 				InstanceID: items[selected].heartbeat.ID, Physical: action.Physical}
 			key := binding.Action.Key()
@@ -480,7 +527,7 @@ func abilityViews(items []discoveredAbility) []map[string]any {
 			"state": item.heartbeat.State, "status": status, "health": map[bool]string{true: "healthy", false: "degraded"}[healthy],
 			"healthy": healthy, "selected": item.selected, "tasks": tasks,
 			"actions": actions, "action_details": actionDetails, "debug_tasks": debugTasks,
-			"config_schema": item.manifest.Schema.Config.OpenAPIV3Schema}
+			"config_schema": item.manifest.Schema.Config.OpenAPIV3Schema, "execution_protocol": item.manifest.ExecutionProtocol}
 		if item.errorText != "" {
 			view["error"] = item.errorText
 		}

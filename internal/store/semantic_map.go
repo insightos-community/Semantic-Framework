@@ -131,14 +131,17 @@ type MapSourceEntity struct {
 }
 
 type MapUpdate struct {
-	Generation        int64             `json:"generation"`
-	ExpectedRevision  int64             `json:"expected_revision"`
-	Source            string            `json:"source"`
-	Entities          []MapEntity       `json:"entities,omitempty"`
-	RemoveEntityIDs   []string          `json:"remove_entity_ids,omitempty"`
-	Relations         []MapRelation     `json:"relations,omitempty"`
-	SourceEntities    []MapSourceEntity `json:"source_entities,omitempty"`
-	RemoveRelationIDs []string          `json:"remove_relation_ids,omitempty"`
+	pilotBinding        *PilotMapBinding
+	NewGenerationReason string            `json:"-"`
+	FrameID             string            `json:"frame_id,omitempty"`
+	Generation          int64             `json:"generation"`
+	ExpectedRevision    int64             `json:"expected_revision"`
+	Source              string            `json:"source"`
+	Entities            []MapEntity       `json:"entities,omitempty"`
+	RemoveEntityIDs     []string          `json:"remove_entity_ids,omitempty"`
+	Relations           []MapRelation     `json:"relations,omitempty"`
+	SourceEntities      []MapSourceEntity `json:"source_entities,omitempty"`
+	RemoveRelationIDs   []string          `json:"remove_relation_ids,omitempty"`
 }
 
 type MapQuery struct {
@@ -417,6 +420,16 @@ func (s *Store) QuerySemanticMap(projectID, slot string, q MapQuery) (MapSnapsho
 	if generationView.ClosedAt != nil {
 		m.UpdatedAt = *generationView.ClosedAt
 	}
+	// Agent/map.query receives semantic facts, not the visualization point cloud.
+	// Full snapshots used by the map panel retain the cloud.
+	for _, entity := range entities {
+		if entity.Type == "map_layer" {
+			if points, ok := entity.Properties["points_m"].([]any); ok {
+				entity.Properties["point_count"] = len(points)
+			}
+			delete(entity.Properties, "points_m")
+		}
+	}
 	return MapSnapshot{Map: m, Generation: generationView, ReadOnly: readOnly, Entities: entities, Relations: relations, NameMatches: nameMatches}, nil
 }
 
@@ -645,11 +658,34 @@ func (s *Store) ApplyMapUpdate(projectID, slot string, update MapUpdate, now tim
 	if update.ExpectedRevision != m.Revision {
 		return MapSnapshot{}, ErrRevisionConflict
 	}
+	if update.FrameID != "" && (slot != MapSlotReal || update.Source != "observation" || update.FrameID != "map") {
+		return MapSnapshot{}, ErrInvalidState
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return MapSnapshot{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if update.NewGenerationReason != "" {
+		if slot != MapSlotReal || update.Source != "observation" {
+			return MapSnapshot{}, ErrInvalidState
+		}
+		changed, err := tx.Exec(`UPDATE semantic_maps SET generation=generation+1,revision=0 WHERE id=? AND generation=? AND revision=?`, m.ID, m.Generation, m.Revision)
+		if err != nil {
+			return MapSnapshot{}, err
+		}
+		if n, _ := changed.RowsAffected(); n != 1 {
+			return MapSnapshot{}, ErrRevisionConflict
+		}
+		if _, err = tx.Exec(`UPDATE map_generations SET closed_at=? WHERE map_id=? AND generation=?`, now, m.ID, m.Generation); err != nil {
+			return MapSnapshot{}, err
+		}
+		m.Generation++
+		m.Revision = 0
+		if _, err = tx.Exec(`INSERT INTO map_generations(map_id,generation,reason,created_at,revision) VALUES(?,?,?,?,0)`, m.ID, m.Generation, update.NewGenerationReason, now); err != nil {
+			return MapSnapshot{}, err
+		}
+	}
 	for _, sourceEntity := range update.SourceEntities {
 		if update.Source == MapSourceUser || strings.TrimSpace(sourceEntity.SourceID) == "" {
 			return MapSnapshot{}, ErrInvalidState
@@ -759,7 +795,7 @@ func (s *Store) ApplyMapUpdate(projectID, slot string, update MapUpdate, now tim
 			return MapSnapshot{}, err
 		}
 	}
-	res, err := tx.Exec(`UPDATE semantic_maps SET revision=revision+1,updated_at=? WHERE id=? AND generation=? AND revision=?`, now, m.ID, m.Generation, m.Revision)
+	res, err := tx.Exec(`UPDATE semantic_maps SET revision=revision+1,updated_at=?,frame_id=CASE WHEN ?='' THEN frame_id ELSE ? END WHERE id=? AND generation=? AND revision=?`, now, update.FrameID, update.FrameID, m.ID, m.Generation, m.Revision)
 	if err != nil {
 		return MapSnapshot{}, err
 	}
@@ -768,6 +804,11 @@ func (s *Store) ApplyMapUpdate(projectID, slot string, update MapUpdate, now tim
 	}
 	if _, err := tx.Exec(`UPDATE map_generations SET revision=revision+1 WHERE map_id=? AND generation=?`, m.ID, m.Generation); err != nil {
 		return MapSnapshot{}, err
+	}
+	if update.pilotBinding != nil {
+		if err := savePilotMapBindingTx(tx, *update.pilotBinding); err != nil {
+			return MapSnapshot{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return MapSnapshot{}, err

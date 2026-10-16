@@ -54,7 +54,7 @@ func (planningToolPolicy) WrapToolCall(ctx context.Context, meta kernel.ToolCall
 	// Task Planning 不自动注入整张地图，但允许 Agent 在确有需要时查询当前
 	// 语义事实或询问用户。文件和 Artifact 探索仍然关闭，避免把历史材料误当成
 	// 当前场景；Robot 物理工具则只属于后续 Task Execution Run。
-	if meta.Name != planningSkillTool && meta.Name != "map.query" && meta.Name != "interaction.ask" {
+	if meta.Name != planningSkillTool && meta.Name != "map.query" && meta.Name != "robot.list" && meta.Name != "interaction.ask" {
 		return tool.ErrorResult(tool.CodeToolError,
 			fmt.Sprintf("Planning Run 不允许调用工具 %q", meta.Name), false), nil
 	}
@@ -145,6 +145,15 @@ func (s *Service) resolveRobotTaskAssignment(wf store.Workflow, task store.Task)
 	}
 	var fallback workflow.TaskAssignment
 	for _, pilot := range pilots {
+		if wf.ProjectID != "" {
+			member, err := s.st.ProjectHasRobot(wf.ProjectID, pilot.RobotID)
+			if err != nil {
+				return workflow.TaskAssignment{}, err
+			}
+			if !member {
+				continue
+			}
+		}
 		if pilot.Status != "online" || pilot.RobotStatus != "idle" ||
 			pilot.CurrentExecutionID != "" || pilot.AbilityFrameworkStatus != "ready" {
 			continue
@@ -1150,10 +1159,10 @@ func (s *Service) buildPurposeRuntimeWithSkills(ctx context.Context, sessionID, 
 	if restricted {
 		derived.Tools.Namespaces = nil
 		if planConversation {
-			derived.Tools.Namespaces = []string{"system.*", "artifact.get", "artifact.list", "map.query",
+			derived.Tools.Namespaces = []string{"system.*", "artifact.get", "artifact.list", "map.query", "robot.list",
 				"plan.suggest", "interaction.ask"}
 		} else if planning {
-			derived.Tools.Namespaces = []string{"map.query", "interaction.ask"}
+			derived.Tools.Namespaces = []string{"map.query", "robot.list", "interaction.ask"}
 		} else if robotDecision {
 			// 抓取、放置等物理checkpoint必须只消费Skill已经给出的当前事实，
 			// 不能因为通用Prompt误导而重新查询整张Map。仅导航目标替换需要
@@ -1182,7 +1191,7 @@ func (s *Service) buildPurposeRuntimeWithSkills(ctx context.Context, sessionID, 
 			derived.Instruction += `
 当前对话由用户显式选择了 Plan Mode。你仍在原 Conversation 中与用户交流：先读取必要上下文、说明理解，只提出真正影响方案的澄清问题；需要结构化回答时调用 interaction.ask，回答会在新的 Leader Run 中自动带回，然后继续收敛。不得修改文件、执行命令、调用 Skill、委派 Agent、部署或操作 Robot。不要在需求仍不明确时调用 plan.suggest；当目标、约束和完成条件已经足够时，调用 plan.suggest，并在 tasks 中提交完整的 Leader Task TODO 与依赖。Task 只描述业务目标、角色、能力、资源范围和完成标准，不要生成 SubTask、Stage、Action 或 Ability。plan.suggest 成功即表示当前 revision 已 ready，可由计划卡完整展示；只需简短请用户在计划卡审阅、批准或继续对话修改，不要在回复中重复整份计划。批准由用户界面携带精确 revision 直接提交给 Workflow Service，Leader 不执行批准状态迁移，也不能声称仅凭一条自然语言消息已经开始 Workflow。用户要求调整时，应重新调用 plan.suggest 生成新 revision。constraints 与 completion_criteria 必须传数组或对象；map_binding 只有在用户要求核对地图且已有精确 map_id、generation 与 selections 时才传，没有有效选择时省略。绝不能用 true/false 充当结构化字段。若工具返回 BAD_ARGUMENTS，应按错误纠正参数，最多再调用一次。不要使用 artifact.list 推断 Workflow 或 Robot Execution 状态，领域进度由 Workflow/Robot 事件和运行视图展示。不要把 Markdown 文本冒充可执行 Workflow。`
 			derived.Instruction += `
-Plan Mode 的 Leader 本来就不会注入 robot.get、robot.run、robot.stop；计划确认后，Workflow 会把这些工具注入已绑定 Robot 的 Robot Worker。不要向用户报告当前 Leader 看不到 robot.*，也不要把它误报为系统缺少执行能力。用户给出的目标引用、位姿、generation 或 revision 可以作为 Robot Task 输入直接保留；只有用户明确要求核对地图，或计划本身必须选择当前地图实体时才调用 map.query。用户要求直接传值或不要查询地图后必须停止 map.query。`
+普通对话及 Plan Mode 可以使用只读 robot.list 查询项目机器人、已装 Skill 和 localization 实时定位，无需 Robot Worker 绑定；当前位置仅使用目标 robot_id 的 localization.available=true 结果，同时报告 frame、age_s 和 checked_at，不能用地图缺少 robot 实体判定无定位，也不能把另一机器人或过期数据当作当前位置；available_robots 必须先添加到项目才参与编排。Plan Mode 的 Leader 不会注入 robot.get、robot.run、robot.stop；计划确认后，Workflow 会把这些工具注入已绑定 Robot 的 Robot Worker。不要向用户报告当前 Leader 看不到 robot.*，也不要把它误报为系统缺少执行能力。用户给出的目标引用、位姿、generation 或 revision 可以作为 Robot Task 输入直接保留；只有用户明确要求核对地图，或计划本身必须选择当前地图实体时才调用 map.query。用户要求直接传值或不要查询地图后必须停止 map.query。`
 			derived.Instruction += "\nTask required_role 只能使用 robot、developer、map、monitor；resource_requirements 只允许 robot_ids、robot_models、backends、workspace_write，并且只保存用户明确要求的资源限制。backends必须使用Robot实际目录中的实现标识；simulation只是环境类别，不是backend，不限制实现时直接省略。业务对象、目标与几何提示写入 Task input；查询得到的稳定业务引用应原样保留，entity_id只作可选规划来源。应用对象的选择、映射与完成判据依据当前Project知识、Agent Skill和实时查询结果，不从名称推测物理状态。"
 		} else if robotDecision {
 			derived.Instruction += "\n\n当前是Robot Skill安全checkpoint的局部决策Run。只根据当前请求中的reason、context、allowed_decisions和response_schema返回类型化JSON；不得调用robot.run/stop、修改Workflow或重新规划整个Task。抓取或放置checkpoint不是导航规划，不得自行改写底盘目标。确需业务或安全选择时可以询问用户。"

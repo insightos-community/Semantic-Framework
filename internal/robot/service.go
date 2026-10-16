@@ -132,6 +132,9 @@ type AvailabilityObserver interface {
 type Service struct {
 	// 发布锁保护“检查版本 → 写包 → 登记”的完整过程，已发布版本保持不可变。
 	publishMu    sync.Mutex
+	twinMu       sync.RWMutex
+	twins        map[string]twinSample
+	mapMu        sync.Mutex // Serializes source selection and incoming map projections.
 	st           *store.Store
 	events       EventSink
 	now          func() time.Time
@@ -153,7 +156,7 @@ func NewService(st *store.Store, events EventSink) *Service {
 	if events == nil {
 		events = nopEventSink{}
 	}
-	return &Service{st: st, events: events, now: time.Now,
+	return &Service{st: st, events: events, now: time.Now, twins: make(map[string]twinSample),
 		sessions: make(map[string]*pilotSession), transfers: make(map[string]Transfer),
 		commands: make(map[string]pendingCommand), subscribers: make(map[chan DeviceEvent]struct{})}
 }
@@ -1627,7 +1630,8 @@ func (s *Service) PublishSkillArchive(reader io.Reader) (store.RobotSkillPackage
 	}
 	required := actionList(parsed.Extensions["required_actions"])
 	stop := actionList(parsed.Extensions["stop_actions"])
-	if len(required) == 0 || len(stop) == 0 {
+	runtimeSpec, _ := parsed.Extensions["runtime"].(map[string]any)
+	if len(required) == 0 || (len(stop) == 0 && runtimeSpec["stop_strategy"] != "cancel_actions") {
 		return store.RobotSkillPackage{}, errors.New("Robot Skill 缺少 required_actions 或 stop_actions")
 	}
 	target := filepath.Join(s.st.RobotSkillPackageDir(), safeSegment(parsed.Name), safeSegment(version), "package.zip")
