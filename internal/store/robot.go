@@ -391,10 +391,24 @@ func (s *Store) GetRobotExecutionBySubTask(subtaskID string) (RobotExecution, er
 }
 
 func (s *Store) ListRobotExecutions(projectID, robotID string, limit int) ([]RobotExecution, error) {
+	return s.listRobotExecutions(projectID, robotID, limit, false)
+}
+
+// ListRobotExecutionSummaries avoids decoding multi-megabyte plans and results
+// for device catalogs. Detail and business consumers retain full records.
+func (s *Store) ListRobotExecutionSummaries(projectID, robotID string, limit int) ([]RobotExecution, error) {
+	return s.listRobotExecutions(projectID, robotID, limit, true)
+}
+
+func (s *Store) listRobotExecutions(projectID, robotID string, limit int, summary bool) ([]RobotExecution, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT body FROM robot_executions
+	column := "body"
+	if summary {
+		column = "json_remove(body, '$.input', '$.result', '$.input_bindings')"
+	}
+	rows, err := s.db.Query(`SELECT `+column+` FROM robot_executions
 		WHERE (?='' OR project_id=?) AND (?='' OR robot_id=?)
 		ORDER BY updated_at DESC LIMIT ?`, projectID, projectID, robotID, robotID, limit)
 	if err != nil {
