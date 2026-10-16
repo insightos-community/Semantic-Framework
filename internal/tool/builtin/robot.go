@@ -42,15 +42,18 @@ func RegisterRobotTools(reg *tool.Registry, service *robotdomain.Service) error 
 type robotGetTool struct{ service *robotdomain.Service }
 
 func (t *robotGetTool) Def() tool.Definition {
-	return tool.Definition{Name: "robot.get", Namespace: "robot", Description: "默认返回精简 Robot 在线事实、已装 Skill 摘要、当前 Task/Run/Execution/步骤与只读 physical_state。physical_state 为 unavailable/stale 时不能据此判断当前携物；holding_object=null 不能证明双工具空载。include_details仅在未指定skill_name的非Task诊断中返回完整Robot配置；指定skill_name只返回该Skill契约，不附带全量Ability。执行前缺少准确契约时按需传 skill_name 获取 skill_contract，不得猜字段；skill_version 省略仅能解析当前 Robot 唯一已安装启用版本，不使用 Registry latest。按 execution_id 可查询本 Project 此 Robot 的完整执行结果、图像引用与分页事件。", ParametersJSON: `{"type":"object","properties":{"include_details":{"type":"boolean","default":false},"skill_name":{"type":"string","minLength":1},"skill_version":{"type":"string","minLength":1},"execution_id":{"type":"string"},"after_sequence":{"type":"integer","minimum":0}},"additionalProperties":false}`, Annotations: tool.Annotations{Risk: tool.RiskLow, Idempotent: true}}
+	return tool.Definition{Name: "robot.get", Namespace: "robot", Description: "默认返回精简 Robot 在线事实、已装 Skill 摘要、当前 Task/Run/Execution/步骤与只读 physical_state。尚未建立 Execution 时，current_subtask.spec 仍返回当前作用域的准确 Skill/版本/intent，completed_subtasks 提供已完成结果的查询引用，可在上下文压缩后恢复调用身份。physical_state 为 unavailable/stale 时不能据此判断当前携物；holding_object=null 不能证明双工具空载。include_details仅在未指定skill_name的非Task诊断中返回完整Robot配置；指定skill_name只返回该Skill契约，不附带全量Ability。执行前缺少准确契约时按需传 skill_name 获取 skill_contract，不得猜字段；skill_version 省略仅能解析当前 Robot 唯一已安装启用版本，不使用 Registry latest。读取 Skill 正文链接的补充文档时传 skill_name 与 resource_path（包内相对路径），返回确切已安装版本的只读文本，不需要发起动作。按 execution_id 查询本 Project 此 Robot 的执行结果。仅读取少数字段时同时传 result_paths（相对 execution.result 的 JSON Pointer，例如 /payload/multi_view、/payload/session_id）；只返回这些原值和执行身份，避免大图像/轨迹及重复事件占满上下文。缺失路径在 result_path_errors 中说明，成功路径仍在 result_values 中返回；按原字段修正路径，不把缺失值当作事实。省略 result_paths 返回原 Execution（含 input/result），不附带重复事件；需要 Action 事件时显式传 include_events=true 或 after_sequence。", ParametersJSON: `{"type":"object","properties":{"include_details":{"type":"boolean","default":false},"skill_name":{"type":"string","minLength":1},"skill_version":{"type":"string","minLength":1},"resource_path":{"type":"string","minLength":1},"execution_id":{"type":"string"},"include_events":{"type":"boolean","default":false},"result_paths":{"type":"array","items":{"type":"string"},"minItems":1},"after_sequence":{"type":"integer","minimum":0}},"additionalProperties":false}`, Annotations: tool.Annotations{Risk: tool.RiskLow, Idempotent: true}}
 }
 func (t *robotGetTool) Run(ctx context.Context, raw string) (string, error) {
 	var args struct {
-		IncludeDetails bool   `json:"include_details"`
-		SkillName      string `json:"skill_name"`
-		SkillVersion   string `json:"skill_version"`
-		ExecutionID    string `json:"execution_id"`
-		AfterSequence  int64  `json:"after_sequence"`
+		IncludeDetails bool     `json:"include_details"`
+		SkillName      string   `json:"skill_name"`
+		SkillVersion   string   `json:"skill_version"`
+		ResourcePath   string   `json:"resource_path"`
+		ExecutionID    string   `json:"execution_id"`
+		AfterSequence  int64    `json:"after_sequence"`
+		ResultPaths    []string `json:"result_paths"`
+		IncludeEvents  bool     `json:"include_events"`
 	}
 	if raw != "" {
 		if err := json.Unmarshal([]byte(raw), &args); err != nil || args.AfterSequence < 0 {
@@ -58,8 +61,8 @@ func (t *robotGetTool) Run(ctx context.Context, raw string) (string, error) {
 		}
 	}
 	args.SkillName, args.SkillVersion = strings.TrimSpace(args.SkillName), strings.TrimSpace(args.SkillVersion)
-	if args.SkillVersion != "" && args.SkillName == "" {
-		return "", &tool.Error{Code: "BAD_ARGUMENTS", Message: "skill_version 必须与 skill_name 一起提供"}
+	if (args.SkillVersion != "" || args.ResourcePath != "") && args.SkillName == "" {
+		return "", &tool.Error{Code: "BAD_ARGUMENTS", Message: "skill_version/resource_path 必须与 skill_name 一起提供"}
 	}
 	scope, ok := tool.ExecutionScopeFromContext(ctx)
 	if !ok || scope.RobotID == "" {
@@ -69,6 +72,68 @@ func (t *robotGetTool) Run(ctx context.Context, raw string) (string, error) {
 		if err := t.service.ValidateDirectRunScope(scope.ProjectID, scope.RunID, scope.AgentID, scope.RobotID); err != nil {
 			return "", robotToolError(err)
 		}
+	}
+	if len(args.ResultPaths) > 0 {
+		if args.ExecutionID == "" {
+			return "", &tool.Error{Code: "BAD_ARGUMENTS", Message: "result_paths 需要 execution_id"}
+		}
+		execution, err := t.service.Store().GetRobotExecution(args.ExecutionID)
+		if err != nil || execution.ProjectID != scope.ProjectID || execution.RobotID != scope.RobotID {
+			return "", &tool.Error{Code: "ROBOT_EXECUTION_OUTSIDE_SCOPE", Message: "Execution 不属于当前 Project 与 Robot"}
+		}
+		values := make(map[string]any, len(args.ResultPaths))
+		missing := make(map[string]string)
+		for _, path := range args.ResultPaths {
+			selected, err := robotdomain.SelectResultPaths(execution.Result, []string{path})
+			if err != nil {
+				missing[path] = err.Error()
+				continue
+			}
+			values[path] = selected[path]
+		}
+		// A well-formed read query can ask for an absent field. Report that as
+		// lookup data, not an invalid tool invocation consuming the Agent's
+		// format-correction budget. Binding inputs remains strict and never uses
+		// missing values; valid siblings are still available for decisions.
+		return tool.OKResult(map[string]any{"execution": robotExecutionSummary(execution),
+			"result_values": values, "result_path_errors": missing, "result_query_complete": len(missing) == 0})
+	}
+	if args.ExecutionID != "" && !args.IncludeEvents && args.AfterSequence == 0 {
+		execution, err := t.service.Store().GetRobotExecution(args.ExecutionID)
+		if err != nil || execution.ProjectID != scope.ProjectID || execution.RobotID != scope.RobotID {
+			return "", &tool.Error{Code: "ROBOT_EXECUTION_OUTSIDE_SCOPE", Message: "Execution 不属于当前 Project 与 Robot"}
+		}
+		return tool.OKResult(map[string]any{"execution": execution})
+	}
+	if args.ResourcePath != "" {
+		// Resolve the exact enabled installation before reading from the published
+		// archive. This path needs neither a physical-state query nor live input
+		// introspection and never exposes an arbitrary server file.
+		detail, err := t.service.GetInstalledSkillPackageDetail(scope.RobotID, args.SkillName, args.SkillVersion)
+		if err != nil {
+			return "", robotToolError(err)
+		}
+		resource, content, err := t.service.ReadSkillPackageResource(detail.Name, detail.Version, args.ResourcePath)
+		if err != nil {
+			return "", &tool.Error{Code: "ROBOT_SKILL_RESOURCE_INVALID", Message: err.Error()}
+		}
+		return tool.OKResult(map[string]any{"skill_resource": map[string]any{
+			"skill_name": detail.Name, "skill_version": detail.Version,
+			"path": resource.Path, "media_type": resource.MediaType, "content": content,
+		}})
+	}
+	if (scope.RunKind == store.RunKindTaskPlanning || scope.PlanningContract) && args.SkillName != "" {
+		// Planning needs public semantics and reference documents, not a live
+		// worker's large parameter schema. Match the existing planning catalog.
+		detail, err := t.service.GetInstalledSkillPackageDetail(scope.RobotID, args.SkillName, args.SkillVersion)
+		if err != nil {
+			return "", robotToolError(err)
+		}
+		return tool.OKResult(map[string]any{"skill_contract": map[string]any{
+			"name": detail.Name, "version": detail.Version,
+			"description": detail.Description, "when_to_use": detail.WhenToUse,
+			"documentation": detail.Body, "resources": detail.Resources,
+		}})
 	}
 	pilot, skills, err := t.service.GetRobot(scope.RobotID)
 	if err != nil {
@@ -109,6 +174,7 @@ func (t *robotGetTool) Run(ctx context.Context, raw string) (string, error) {
 			"name": detail.Name, "version": detail.Version, "description": detail.Description,
 			"when_to_use": detail.WhenToUse, "documentation": detail.Body,
 			"required_actions": detail.RequiredActions, "stop_actions": detail.StopActions,
+			"resources": detail.Resources,
 		}
 		if runtimeSpec, ok := detail.Extensions["runtime"].(map[string]any); ok {
 			contract["input_model"], _ = runtimeSpec["input_model"].(string)
@@ -139,6 +205,33 @@ func (t *robotGetTool) Run(ctx context.Context, raw string) (string, error) {
 						"goal": robotSummaryText(subtask.Goal, 512), "updated_at": subtask.UpdatedAt}
 				}
 			}
+		}
+	}
+	// During parameter preparation no Robot Execution exists yet. The scoped
+	// SubTask still defines the exact call, including its pinned version. Keep
+	// it queryable after model context summarization, independently of Pilot's
+	// current/previous execution pointer.
+	if scope.SubtaskID != "" {
+		subtask, subErr := t.service.Store().GetSubTask(scope.SubtaskID)
+		task, taskErr := t.service.Store().GetTask(scope.TaskID)
+		workflow, workflowErr := t.service.Store().GetWorkflow(scope.WorkflowID)
+		if subErr == nil && taskErr == nil && workflowErr == nil &&
+			subtask.TaskID == task.ID && task.WorkflowID == workflow.ID &&
+			workflow.ProjectID == scope.ProjectID && task.AssignedRobotID == scope.RobotID {
+			result["current_subtask"] = map[string]any{"id": subtask.ID, "task_id": subtask.TaskID,
+				"position": subtask.Position, "kind": subtask.Kind, "status": subtask.Status,
+				"goal": subtask.Goal, "spec": subtask.Spec, "execution_id": subtask.ExecutionRef}
+			completed := make([]map[string]any, 0)
+			if previous, err := t.service.Store().ListSubTasks(task.ID); err == nil {
+				for _, item := range previous {
+					if item.Status == store.TaskStatusCompleted && item.ExecutionRef != "" {
+						completed = append(completed, map[string]any{"subtask_id": item.ID,
+							"goal": robotSummaryText(item.Goal, 512), "execution_id": item.ExecutionRef,
+							"result_lookup": map[string]any{"tool": "robot.get", "arguments": map[string]any{"execution_id": item.ExecutionRef}}})
+					}
+				}
+			}
+			result["completed_subtasks"] = completed
 		}
 	}
 	if args.ExecutionID != "" {
@@ -203,14 +296,15 @@ func robotSummaryText(value string, limit int) string {
 }
 
 type robotRunArgs struct {
-	SkillName    string         `json:"skill_name"`
-	SkillVersion string         `json:"skill_version"`
-	Input        map[string]any `json:"input"`
+	SkillName     string                    `json:"skill_name"`
+	SkillVersion  string                    `json:"skill_version"`
+	Input         map[string]any            `json:"input"`
+	InputBindings []store.RobotInputBinding `json:"input_bindings"`
 }
 type robotRunTool struct{ service *robotdomain.Service }
 
 func (t *robotRunTool) Def() tool.Definition {
-	return tool.Definition{Name: "robot.run", Namespace: "robot", Description: "在当前 Robot 上启动一个已安装 Skill；使用准确 skill_version 与契约字段，缺少契约时先 robot.get(skill_name)。受理后立即返回 Execution ID 并结束本轮请求，实际进度和结果由执行面板展示；accepted 不代表任务成功。不得轮询或再次调用以重放参数。", ParametersJSON: `{"type":"object","properties":{"skill_name":{"type":"string"},"skill_version":{"type":"string"},"input":{"type":"object"}},"required":["skill_name","skill_version","input"],"additionalProperties":false}`, Annotations: tool.Annotations{Risk: tool.RiskHigh, Timeout: 15 * time.Minute}}
+	return tool.Definition{Name: "robot.run", Namespace: "robot", Description: "在当前 Robot 上启动一个已安装 Skill。前序执行结果中的 Atlas 数据、目标锁、反馈、轨迹包和 digest 请用 input_bindings 按字段原样传递，不由模型逐字重写。每项 {input_path,execution_id,result_path} 使用 JSON Pointer，result_path 相对 execution.result；input_path 写入本次 input，该字段不需再填写字面值。可先用 robot.get(result_paths) 读取决策所需小字段。绑定只填原值，仍执行原 Skill 输入校验、任务授权和幂等检查；使用准确 skill_version 与契约字段，缺少契约时先 robot.get(skill_name)。受理后立即返回 Execution ID 并结束本轮请求，实际进度和结果由执行面板展示；accepted 不代表任务成功。不得轮询或再次调用以重放参数。", ParametersJSON: `{"type":"object","properties":{"skill_name":{"type":"string"},"skill_version":{"type":"string"},"input":{"type":"object"},"input_bindings":{"type":"array","items":{"type":"object","properties":{"input_path":{"type":"string","minLength":1},"execution_id":{"type":"string","minLength":1},"result_path":{"type":"string"}},"required":["input_path","execution_id","result_path"],"additionalProperties":false}}},"required":["skill_name","skill_version","input"],"additionalProperties":false}`, Annotations: tool.Annotations{Risk: tool.RiskHigh, Timeout: 15 * time.Minute}}
 }
 func (t *robotRunTool) Run(ctx context.Context, raw string) (string, error) {
 	var args robotRunArgs
@@ -225,7 +319,7 @@ func (t *robotRunTool) Run(ctx context.Context, raw string) (string, error) {
 	request := robotdomain.RunRequest{ProjectID: scope.ProjectID, WorkflowID: scope.WorkflowID,
 		TaskID: scope.TaskID, SubtaskID: scope.SubtaskID, RunID: scope.RunID, AgentID: scope.AgentID,
 		RobotID: scope.RobotID, SkillName: args.SkillName, SkillVersion: args.SkillVersion,
-		Input: args.Input, RequestKey: robotRunRequestKey(scope), ArtifactRefs: collectArtifactRefs(args.Input)}
+		Input: args.Input, InputBindings: args.InputBindings, RequestKey: robotRunRequestKey(scope), ArtifactRefs: collectArtifactRefs(args.Input)}
 	if direct {
 		if scope.InteractionMode == "plan" {
 			return "", &tool.Error{Code: "ROBOT_SKILL_OUTSIDE_APPROVED_SCOPE", Message: "规划模式不能执行 Robot 动作"}

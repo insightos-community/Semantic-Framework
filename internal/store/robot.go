@@ -72,6 +72,14 @@ type RobotPilotSkill struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+// RobotInputBinding records the exact completed result used to fill an input
+// field. It is resolved before normal Skill validation, never by the model.
+type RobotInputBinding struct {
+	InputPath   string `json:"input_path"`
+	ExecutionID string `json:"execution_id"`
+	ResultPath  string `json:"result_path"`
+}
+
 type RobotExecution struct {
 	ID              string                 `json:"id"`
 	ProjectID       string                 `json:"project_id"`
@@ -89,6 +97,7 @@ type RobotExecution struct {
 	Stage           string                 `json:"stage,omitempty"`
 	Progress        *float64               `json:"progress,omitempty"`
 	Input           map[string]any         `json:"input"`
+	InputBindings   []RobotInputBinding    `json:"input_bindings,omitempty"`
 	ArtifactRefs    []string               `json:"artifact_refs"`
 	ArtifactSync    []RobotArtifactMapping `json:"artifact_sync,omitempty"`
 	Result          map[string]any         `json:"result,omitempty"`

@@ -191,10 +191,11 @@ func (h *RobotsHandler) HandleStartSkillDebug(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var request struct {
-		SkillName    string         `json:"skill_name"`
-		SkillVersion string         `json:"skill_version"`
-		Input        map[string]any `json:"input"`
-		RequestKey   string         `json:"request_key"`
+		SkillName     string                    `json:"skill_name"`
+		SkillVersion  string                    `json:"skill_version"`
+		Input         map[string]any            `json:"input"`
+		RequestKey    string                    `json:"request_key"`
+		InputBindings []store.RobotInputBinding `json:"input_bindings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil ||
 		strings.TrimSpace(request.SkillName) == "" ||
@@ -207,12 +208,13 @@ func (h *RobotsHandler) HandleStartSkillDebug(w http.ResponseWriter, r *http.Req
 		request.Input = map[string]any{}
 	}
 	execution, err := h.service.Run(r.Context(), robotdomain.RunRequest{
-		ProjectID:    projectID,
-		RobotID:      chi.URLParam(r, "robot_id"),
-		SkillName:    strings.TrimSpace(request.SkillName),
-		SkillVersion: strings.TrimSpace(request.SkillVersion),
-		RequestKey:   strings.TrimSpace(request.RequestKey),
-		Input:        request.Input,
+		ProjectID:     projectID,
+		RobotID:       chi.URLParam(r, "robot_id"),
+		SkillName:     strings.TrimSpace(request.SkillName),
+		SkillVersion:  strings.TrimSpace(request.SkillVersion),
+		RequestKey:    strings.TrimSpace(request.RequestKey),
+		Input:         request.Input,
+		InputBindings: request.InputBindings,
 	})
 	if err != nil {
 		writeRobotError(w, err)
@@ -455,6 +457,10 @@ func writeRobotError(w http.ResponseWriter, err error) {
 		writeError(w, 409, "ROBOT_EXECUTION_NOT_ACTIVE", err.Error())
 	case errors.Is(err, robotdomain.ErrSkillUnavailable):
 		writeError(w, 409, "ROBOT_SKILL_UNAVAILABLE", err.Error())
+	case errors.Is(err, robotdomain.ErrSkillInputInvalid):
+		// Match robot.run: invalid arguments were rejected before creating an
+		// execution, and must not look like a device or transport failure.
+		writeError(w, http.StatusBadRequest, "ROBOT_SKILL_INPUT_INVALID", err.Error())
 	case errors.Is(err, robotdomain.ErrAbilityTaskUnknown):
 		writeError(w, 409, "ABILITY_TASK_UNAVAILABLE", err.Error())
 	case errors.Is(err, robotdomain.ErrRequestConflict):

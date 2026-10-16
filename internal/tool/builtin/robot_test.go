@@ -137,6 +137,13 @@ Use target.object_ref from the current request.
 `)); err != nil {
 		t.Fatal(err)
 	}
+	entry, err = writer.Create("exact-skill/references/flow.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = entry.Write([]byte("Prepare then execute. Read actual feedback before landing.")); err != nil {
+		t.Fatal(err)
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -253,8 +260,54 @@ Use target.object_ref from the current request.
 		t.Fatal("必须返回已安装 Worker 的真实 Schema，不得由模型标识或示例拼接")
 	}
 	selected := read(`{"skill_name":"exact-skill","include_details":true}`)
-	if selected["robot_details"] != nil || contract["extensions"] != nil || contract["resources"] != nil {
+	if selected["robot_details"] != nil || contract["extensions"] != nil || len(contract["resources"].([]any)) != 1 {
 		t.Fatal("选定 Skill 不得携带整个 Robot/Ability 目录或重复扩展文档")
+	}
+	resource := read(`{"skill_name":"exact-skill","resource_path":"references/flow.md"}`)
+	if resource["skill_contract"] != nil || resource["physical_state"] != nil {
+		t.Fatal("A resource read must not fetch live input schema or physical state")
+	}
+	text := resource["skill_resource"].(map[string]any)
+	if text["skill_version"] != "1.0.0" || text["content"] != "Prepare then execute. Read actual feedback before landing." {
+		t.Fatalf("Expected the installed immutable package resource: %+v", text)
+	}
+	// Exercise the real executor boundary as well as the tool implementation.
+	// Planning previously exposed robot.get but rejected it before Run.
+	reg := tool.NewRegistry()
+	if err := reg.Register(get); err != nil {
+		t.Fatal(err)
+	}
+	executor := tool.NewExecutor(reg, tool.ExecutorOptions{})
+	planningCtx := tool.WithExecutionScope(context.Background(), tool.ExecutionScope{
+		ProjectID: project.ID, TaskID: "current-task", RobotID: "contract-robot",
+		SessionID: "contract-session", RunKind: store.RunKindTaskPlanning,
+		WorkspaceRoot: t.TempDir(),
+	})
+	planningOut, planningErr := executor.ExecuteOne(planningCtx, "robot.get",
+		`{"skill_name":"exact-skill","resource_path":"references/flow.md"}`)
+	if planningErr != nil || !strings.Contains(planningOut, "Read actual feedback before landing.") {
+		t.Fatalf("Planning must read installed references through the executor: %s %v", planningOut, planningErr)
+	}
+	planningOut, planningErr = executor.ExecuteOne(planningCtx, "robot.get", `{"skill_name":"exact-skill"}`)
+	if planningErr != nil || !strings.Contains(planningOut, "target.object_ref") ||
+		strings.Contains(planningOut, "input_schema") || strings.Contains(planningOut, "physical_state") {
+		t.Fatalf("Planning contract lookup must preserve semantics without live parameter schemas: %s %v", planningOut, planningErr)
+	}
+	// Recovery is persisted as TaskExecution, but it only chooses the next
+	// plan. Do not pull the Pilot's large execution schema into that decision.
+	recoveryScope, _ := tool.ExecutionScopeFromContext(planningCtx)
+	recoveryScope.RunKind = store.RunKindTaskExecution
+	recoveryScope.PlanningContract = true
+	recoveryOut, recoveryErr := executor.ExecuteOne(tool.WithExecutionScope(context.Background(), recoveryScope),
+		"robot.get", `{"skill_name":"exact-skill"}`)
+	if recoveryErr != nil || recoveryOut != planningOut {
+		t.Fatalf("Recovery must reuse the planning contract projection: %s %v", recoveryOut, recoveryErr)
+	}
+	for _, name := range []string{"robot.run", "robot.stop"} {
+		out, err := executor.ExecuteOne(planningCtx, name, `{}`)
+		if err != nil || !strings.Contains(out, "Planning Run 不允许") {
+			t.Fatalf("Reference access must not admit physical tools: %s %s %v", name, out, err)
+		}
 	}
 	taskCtx := tool.WithExecutionScope(context.Background(), tool.ExecutionScope{
 		ProjectID: project.ID, TaskID: "current-task", RobotID: "contract-robot", SessionID: "contract-session",
@@ -266,6 +319,11 @@ Use target.object_ref from the current request.
 	}
 	for _, test := range []struct{ raw, code string }{
 		{`{"skill_version":"1.0.0"}`, "BAD_ARGUMENTS"},
+		{`{"resource_path":"references/flow.md"}`, "BAD_ARGUMENTS"},
+		{`{"skill_name":"exact-skill","resource_path":"../../secret"}`, "ROBOT_SKILL_RESOURCE_INVALID"},
+		{`{"skill_name":"exact-skill","resource_path":"/etc/passwd"}`, "ROBOT_SKILL_RESOURCE_INVALID"},
+		{`{"skill_name":"exact-skill","resource_path":"missing.md"}`, "ROBOT_SKILL_RESOURCE_INVALID"},
+		{`{"skill_name":"missing","resource_path":"references/flow.md"}`, "ROBOT_SKILL_UNAVAILABLE"},
 		{`{"skill_name":"missing"}`, "ROBOT_SKILL_UNAVAILABLE"},
 		{`{"skill_name":"exact-skill","skill_version":"9.0.0"}`, "ROBOT_SKILL_UNAVAILABLE"},
 	} {
@@ -292,7 +350,7 @@ Use target.object_ref from the current request.
 		t.Fatalf("读取契约不得申请动作占用: %+v %v", run, err)
 	}
 	definition := get.Def()
-	for _, field := range []string{"skill_name", "skill_version"} {
+	for _, field := range []string{"skill_name", "skill_version", "resource_path"} {
 		if !strings.Contains(definition.ParametersJSON, field) {
 			t.Fatalf("robot.get Schema 未暴露 %s", field)
 		}

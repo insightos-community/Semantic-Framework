@@ -151,7 +151,7 @@ func TestValidateTaskSkillScopeUsesApprovedSubTask(t *testing.T) {
 		Tasks: []store.TaskDraft{{ID: "task-scope", RequiredRole: "robot", Goal: "由一个 Robot 完成搬运",
 			SubTasks: []store.SubTaskDraft{{ID: "subtask-scope", Kind: "robot_skill",
 				Goal: "抓取目标", Spec: json.RawMessage(
-					`{"skill_name":"grasp-object","skill_version":"0.1.0"}`)}}}},
+					`{"skill_name":"grasp-object","skill_version":"0.1.0","intent":{"task":"execute_prepared"}}`)}}}},
 	}
 	ready, err := st.SubmitPlanProposal(project.ID, conversation.ID, draft, "将目标箱体搬运到指定位置", json.RawMessage(`{"robot_ids":["r1pro-1"],"allowed_skills":["grasp-object"]}`),
 		"# 搬运一个箱子", time.Now().UTC())
@@ -180,13 +180,67 @@ func TestValidateTaskSkillScopeUsesApprovedSubTask(t *testing.T) {
 	service := NewService(st, nil)
 	request := RunRequest{ProjectID: project.ID, WorkflowID: view.Workflow.ID,
 		TaskID: task.ID, SubtaskID: subtask.ID, RobotID: "r1pro-1",
-		SkillName: "grasp-object", SkillVersion: "0.1.0"}
+		SkillName: "grasp-object", SkillVersion: "0.1.0", Input: map[string]any{"task": "execute_prepared"}}
 	if err := service.ValidateTaskSkillScope(request); err != nil {
 		t.Fatalf("批准范围内的 Skill 被拒绝: %v", err)
 	}
 	request.SkillName = "place-object"
 	if !errors.Is(service.ValidateTaskSkillScope(request), ErrSkillOutsideTask) {
 		t.Fatal("当前 SubTask 不能借 Robot Task 运行另一个 Skill")
+	}
+	request.SkillName = "grasp-object"
+	request.SkillVersion = "wrong-version"
+	err = service.ValidateTaskSkillScope(request)
+	if !errors.Is(err, ErrSkillOutsideTask) || !strings.Contains(err.Error(), "grasp-object@0.1.0") ||
+		!strings.Contains(err.Error(), "wrong-version") {
+		t.Fatalf("scope rejection must expose the exact approved version for correction: %v", err)
+	}
+	request.SkillVersion = "0.1.0"
+	request.Input = map[string]any{"task": "plan"}
+	commands, disconnect, err := service.Connect(store.RobotPilot{PilotInstanceID: "pilot-scope",
+		RobotID: "r1pro-1", RobotStatus: "idle", AbilityFrameworkStatus: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disconnect()
+	if err := st.SaveRobotPilotSkill(store.RobotPilotSkill{PilotInstanceID: "pilot-scope",
+		Name: "grasp-object", Version: "0.1.0", Status: "installed", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	request.RequestKey, request.AgentID = "wrong-operation", "robot:r1pro-1"
+	if _, err := service.Run(context.Background(), request); !errors.Is(err, ErrSkillInputInvalid) ||
+		!strings.Contains(err.Error(), "intent.task=execute_prepared") || !strings.Contains(err.Error(), "input.task=plan") {
+		t.Fatalf("operation mismatch must be correctable before admission: %v", err)
+	}
+	select {
+	case command := <-commands:
+		t.Fatalf("literal mismatch must not reach Pilot: %+v", command)
+	default:
+	}
+	// An absent task may be supplied by the installed Skill's input defaults.
+	// Recheck that normalized operation without creating an Execution.
+	request.Input = map[string]any{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Run(context.Background(), request)
+		done <- err
+	}()
+	command := receiveCommand(t, commands, "skill.validate_input")
+	if err := service.HandleCommandAckResult("pilot-scope", command.CommandID, true, "",
+		map[string]any{"valid": true, "input": map[string]any{"task": "plan"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; !errors.Is(err, ErrSkillInputInvalid) {
+		t.Fatalf("default operation must also preserve current intent: %v", err)
+	}
+	executions, err := st.ListRobotExecutions(project.ID, "r1pro-1", 20)
+	if err != nil || len(executions) != 0 {
+		t.Fatalf("mismatch admitted an execution: %+v %v", executions, err)
+	}
+	select {
+	case command := <-commands:
+		t.Fatalf("normalization mismatch must not start a Skill: %+v", command)
+	default:
 	}
 }
 

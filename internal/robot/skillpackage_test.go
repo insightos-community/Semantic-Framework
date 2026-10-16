@@ -41,6 +41,7 @@ description: 抓取指定物体并形成 HeldObjectState
 category: robot_skill
 when_to_use: Robot Task 需要抓取已经解析的目标物体时
 version: 0.1.0
+input_tasks: [plan, grasp]
 required_actions:
   - type: perception.locate_object
     schema_version: 1
@@ -70,6 +71,9 @@ stop_actions:
 	}
 	if detail.WhenToUse == "" || detail.Body == "" || len(detail.Resources) != 3 {
 		t.Fatalf("Robot Skill 详情不完整: %#v", detail)
+	}
+	if !reflect.DeepEqual(detail.Extensions["input_tasks"], []any{"plan", "grasp"}) {
+		t.Fatalf("public task metadata not retained: %#v", detail.Extensions["input_tasks"])
 	}
 	resource, content, err := service.ReadSkillPackageResource(
 		"grasp-object", "0.1.0", "references/recovery.md",
