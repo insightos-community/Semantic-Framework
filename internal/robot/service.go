@@ -633,18 +633,19 @@ func (s *Service) interruptRejectedStop(pilotID, executionID, message string) er
 }
 
 type RunRequest struct {
-	ProjectID    string
-	WorkflowID   string
-	TaskID       string
-	SubtaskID    string
-	RunID        string
-	AgentID      string
-	RobotID      string
-	SkillName    string
-	SkillVersion string
-	RequestKey   string
-	Input        map[string]any
-	ArtifactRefs []string
+	ProjectID     string
+	WorkflowID    string
+	TaskID        string
+	SubtaskID     string
+	RunID         string
+	AgentID       string
+	RobotID       string
+	SkillName     string
+	SkillVersion  string
+	RequestKey    string
+	Input         map[string]any
+	InputBindings []store.RobotInputBinding
+	ArtifactRefs  []string
 }
 
 func (s *Service) GetRobot(robotID string) (store.RobotPilot, []store.RobotPilotSkill, error) {
@@ -682,8 +683,12 @@ func robotRequestDigest(request RunRequest) string {
 	if request.TaskID == "" {
 		runID = request.RunID
 	}
-	data, _ := json.Marshal([]any{request.ProjectID, request.WorkflowID, request.TaskID,
-		request.SubtaskID, runID, request.RobotID, request.SkillName, request.SkillVersion, request.Input})
+	parts := []any{request.ProjectID, request.WorkflowID, request.TaskID,
+		request.SubtaskID, runID, request.RobotID, request.SkillName, request.SkillVersion, request.Input}
+	if len(request.InputBindings) > 0 {
+		parts = append(parts, request.InputBindings)
+	}
+	data, _ := json.Marshal(parts)
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
@@ -741,15 +746,50 @@ func (s *Service) ValidateTaskSkillScope(request RunRequest) error {
 		SkillName    string `json:"skill_name"`
 		SkillVersion string `json:"skill_version"`
 	}
-	if json.Unmarshal(subtask.Spec, &spec) != nil ||
-		strings.TrimSpace(spec.SkillName) != strings.TrimSpace(request.SkillName) {
+	if json.Unmarshal(subtask.Spec, &spec) != nil {
 		return ErrSkillOutsideTask
+	}
+	if strings.TrimSpace(spec.SkillName) != strings.TrimSpace(request.SkillName) {
+		return fmt.Errorf("%w: 当前 SubTask %s 使用 %s@%s，收到 %s@%s；请按当前步骤调用", ErrSkillOutsideTask,
+			subtask.ID, spec.SkillName, spec.SkillVersion, request.SkillName, request.SkillVersion)
 	}
 	// 未固定版本表示允许 Pilot 选择用户批准 Skill 的已启用版本；一旦 Proposal
 	// 或 Task Agent 明确了版本，模型不能在执行时自行切换。
 	if strings.TrimSpace(spec.SkillVersion) != "" &&
 		strings.TrimSpace(spec.SkillVersion) != strings.TrimSpace(request.SkillVersion) {
+		return fmt.Errorf("%w: 当前 SubTask %s 固定 %s@%s，收到版本 %s；请保持已批准版本", ErrSkillOutsideTask,
+			subtask.ID, spec.SkillName, spec.SkillVersion, request.SkillVersion)
+	}
+	return nil
+}
+
+func (s *Service) validateSelectedTaskInput(request RunRequest) error {
+	if request.SubtaskID == "" {
+		return nil
+	}
+	subtask, err := s.st.GetSubTask(request.SubtaskID)
+	if err != nil {
+		return err
+	}
+	return validateTaskInputIntent(subtask.ID, subtask.Spec, request.Input)
+}
+
+// For Skills exposing an input.task discriminator, preserve the operation the
+// current SubTask explicitly selected. Same-Skill plan success must not consume
+// an execute step. Other intent metadata remains opaque; this adds no motion
+// policy and does not require task on legacy Skills without that discriminator.
+func validateTaskInputIntent(subtaskID string, raw json.RawMessage, input map[string]any) error {
+	var spec struct {
+		Intent map[string]any `json:"intent"`
+	}
+	if json.Unmarshal(raw, &spec) != nil {
 		return ErrSkillOutsideTask
+	}
+	expected, _ := spec.Intent["task"].(string)
+	actual, _ := input["task"].(string)
+	if expected != "" && actual != "" && expected != actual {
+		return fmt.Errorf("%w: 当前 SubTask %s 的 intent.task=%s，收到 input.task=%s；请执行当前步骤，不能用同一 Skill 的其他调用替代。尚未创建 Execution", ErrSkillInputInvalid,
+			subtaskID, expected, actual)
 	}
 	return nil
 }
@@ -763,6 +803,13 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (store.RobotExecu
 	}
 	if err := s.ValidateRobotProject(request.ProjectID, request.RobotID); err != nil {
 		return store.RobotExecution{}, err
+	}
+	if len(request.InputBindings) > 0 {
+		input, err := s.resolveInputBindings(request)
+		if err != nil {
+			return store.RobotExecution{}, fmt.Errorf("%w: %v", ErrSkillInputInvalid, err)
+		}
+		request.Input = input
 	}
 	if request.TaskID == "" && request.RunID != "" {
 		if request.WorkflowID != "" || request.SubtaskID != "" {
@@ -792,6 +839,11 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (store.RobotExecu
 		if err := s.ValidateTaskSkillScope(request); err != nil {
 			return store.RobotExecution{}, err
 		}
+	}
+	// Input bindings have already been materialized; inspect the actual input,
+	// not the incomplete template seen by the tool's initial scope check.
+	if err := s.validateSelectedTaskInput(request); err != nil {
+		return store.RobotExecution{}, err
 	}
 	if err := s.st.CheckRobotAdmission(request.RobotID, request.TaskID, request.RunID); err != nil {
 		if errors.Is(err, store.ErrRobotReserved) {
@@ -832,6 +884,11 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (store.RobotExecu
 	if normalized, ok := validation["input"].(map[string]any); ok {
 		request.Input = normalized
 	}
+	// Check defaults supplied by the installed Skill as well as literal/bound
+	// inputs, still before admission and without changing the Skill's defaults.
+	if err := s.validateSelectedTaskInput(request); err != nil {
+		return store.RobotExecution{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return store.RobotExecution{}, err
 	}
@@ -842,7 +899,8 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (store.RobotExecu
 		RobotID: request.RobotID, PilotInstanceID: pilot.PilotInstanceID, SkillName: request.SkillName,
 		SkillVersion: request.SkillVersion, RequestKey: request.RequestKey, RequestDigest: robotRequestDigest(originalRequest), Status: "queued",
 		Input: cloneMap(request.Input), ArtifactRefs: append([]string(nil), request.ArtifactRefs...),
-		Revision: 1, CreatedAt: now, UpdatedAt: now}
+		InputBindings: append([]store.RobotInputBinding(nil), request.InputBindings...),
+		Revision:      1, CreatedAt: now, UpdatedAt: now}
 	execution, created, err := s.st.AdmitRobotExecution(execution, request.AgentID)
 	if err != nil {
 		if errors.Is(err, store.ErrRobotReserved) {

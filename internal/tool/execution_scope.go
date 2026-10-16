@@ -35,6 +35,11 @@ type ExecutionScope struct {
 	// 再做一次只读 allowlist 校验，避免只靠模型侧工具列表。
 	RunKind string
 
+	// PlanningContract selects public Skill semantics without live parameter
+	// schemas for recovery decisions. It changes only the read projection;
+	// tool authorization still follows the existing Run policy.
+	PlanningContract bool
+
 	// InteractionMode 是普通 Conversation 本轮的交互模式。plan 不改变
 	// RunKind，但会在执行器层启用与 Planning Run 等价的只读门禁。
 	InteractionMode string
@@ -79,13 +84,14 @@ type ExecutionScope struct {
 // Filesystem 的四个只读工具由 kernel policy 校验，不经过本执行器。
 func PlanningToolAllowed(name string) bool {
 	return strings.HasPrefix(name, "system.") || name == "artifact.get" ||
-		name == "artifact.list" || name == "map.query" || name == "robot.list" || name == "interaction.ask"
+		name == "artifact.list" || name == "map.query" || name == "robot.list" ||
+		name == "robot.get" || name == "interaction.ask"
 }
 
 // ConversationPlanToolAllowed 比独立 Planning Run 额外允许 Proposal 的提交。
 // Proposal 批准由用户界面携带精确 revision 直接提交，不能交给模型猜测。
 func ConversationPlanToolAllowed(name string) bool {
-	return PlanningToolAllowed(name) || name == "plan.suggest" || name == "robot.get"
+	return PlanningToolAllowed(name) || name == "plan.suggest"
 }
 
 // executionScopeKey 使用包内私有类型作为 context key，防止其他包误覆盖。
