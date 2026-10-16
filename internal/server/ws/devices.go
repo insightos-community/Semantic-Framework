@@ -57,8 +57,8 @@ func (g *DeviceGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	conn.SetReadLimit(64 << 10)
 
-	// 前端连接后必须先发送游标。Server 当前只缓存实时增量；游标存在
-	// 缺口时明确要求重新读取 Snapshot，不用不完整事件拼装状态。
+	// Cursor is scoped to one service epoch. Replay closes the snapshot/subscribe
+	// race; expired cursors explicitly require a fresh snapshot.
 	readCtx, cancelRead := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancelRead()
 	_, data, err := conn.Read(readCtx)
@@ -67,15 +67,16 @@ func (g *DeviceGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		Type          string `json:"type"`
+		EventEpoch    string `json:"event_epoch"`
 		AfterSequence int64  `json:"after_sequence"`
 	}
 	if err := json.Unmarshal(data, &request); err != nil || request.Type != "sync" {
 		_ = writeDeviceMessage(r.Context(), conn, map[string]any{"type": "error", "code": "BAD_MESSAGE", "message": "首条消息必须是 sync"})
 		return
 	}
-	events, unsubscribe, err := g.service.SubscribeDevices(request.AfterSequence)
+	events, unsubscribe, err := g.service.SubscribeDevices(request.AfterSequence, request.EventEpoch)
 	if err != nil {
-		_ = writeDeviceMessage(r.Context(), conn, map[string]any{"type": "error", "code": "SYNC_FAILED", "message": err.Error()})
+		_ = writeDeviceMessage(r.Context(), conn, map[string]any{"type": "error", "code": "SYNC_FAILED", "message": err.Error(), "event_epoch": g.service.DeviceEventEpoch()})
 		return
 	}
 	defer unsubscribe()

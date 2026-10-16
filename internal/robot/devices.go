@@ -26,6 +26,7 @@ import (
 )
 
 type DeviceEvent struct {
+	EventEpoch       string    `json:"event_epoch"`
 	ID               string    `json:"id"`
 	Sequence         int64     `json:"sequence"`
 	ResourceType     string    `json:"resource_type"`
@@ -36,15 +37,28 @@ type DeviceEvent struct {
 	Payload          any       `json:"payload"`
 }
 
+// DeviceExecution is a catalog summary. Large inputs/results remain available
+// through execution detail; omitting them also preserves details cached by clients.
+type DeviceExecution struct {
+	store.RobotExecution
+	Input           *struct{} `json:"input,omitempty"`
+	InputBindings   *struct{} `json:"input_bindings,omitempty"`
+	Result          *struct{} `json:"result,omitempty"`
+	DetailsIncluded bool      `json:"details_included"`
+}
+
 type DeviceSnapshot struct {
+	EventEpoch      string                    `json:"event_epoch"`
 	SnapshotVersion int                       `json:"snapshot_version"`
 	EventSequence   int64                     `json:"event_sequence"`
 	Robots          []map[string]any          `json:"robots"`
 	SkillPackages   []store.RobotSkillPackage `json:"skill_packages"`
-	Executions      []store.RobotExecution    `json:"executions"`
+	Executions      []DeviceExecution         `json:"executions"`
 }
 
 func (s *Service) DeviceSnapshot() (DeviceSnapshot, error) {
+	// Capture before reading: events published during the snapshot are replayed.
+	sequence := s.deviceSequence.Load()
 	pilots, err := s.st.ListRobotPilots()
 	if err != nil {
 		return DeviceSnapshot{}, err
@@ -92,14 +106,15 @@ func (s *Service) DeviceSnapshot() (DeviceSnapshot, error) {
 	if err != nil {
 		return DeviceSnapshot{}, err
 	}
-	executions, err := s.st.ListRobotExecutions("", "", 200)
+	executions, err := s.st.ListRobotExecutionSummaries("", "", 200)
 	if err != nil {
 		return DeviceSnapshot{}, err
 	}
-	if executions == nil {
-		executions = make([]store.RobotExecution, 0)
+	summaries := make([]DeviceExecution, 0, len(executions))
+	for _, execution := range executions {
+		summaries = append(summaries, DeviceExecution{RobotExecution: execution})
 	}
-	return DeviceSnapshot{SnapshotVersion: 1, EventSequence: s.deviceSequence.Load(), Robots: robots, SkillPackages: packages, Executions: executions}, nil
+	return DeviceSnapshot{SnapshotVersion: 1, EventEpoch: s.deviceEpoch, EventSequence: sequence, Robots: robots, SkillPackages: packages, Executions: summaries}, nil
 }
 
 func (s *Service) Device(robotID string) (map[string]any, error) {
@@ -269,42 +284,67 @@ func (s *Service) PublishRuntimeEvent(_ context.Context, event robotruntime.Even
 	}
 	return nil
 }
-func (s *Service) SubscribeDevices(after int64) (<-chan DeviceEvent, func(), error) {
+
+// The bounded replay covers the snapshot/subscription race without retaining
+// unbounded execution payloads. An expired cursor requires a new snapshot.
+const deviceReplayLimit = 128
+
+func (s *Service) DeviceEventEpoch() string { return s.deviceEpoch }
+
+func (s *Service) SubscribeDevices(after int64, epoch ...string) (<-chan DeviceEvent, func(), error) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	current := s.deviceSequence.Load()
+	hasEpoch := len(epoch) > 0 && epoch[0] != ""
+	if hasEpoch && epoch[0] != s.deviceEpoch {
+		return nil, nil, errors.New("设备事件服务已重启，请重新读取快照")
+	}
 	if after < 0 || after > current {
 		return nil, nil, errors.New("设备事件游标非法")
 	}
-	if after != 0 && after < current {
+	// Legacy subscribers with cursor zero request live events only.
+	if after == 0 && !hasEpoch {
+		after = current
+	}
+	if after < current && (len(s.deviceHistory) == 0 || after < s.deviceHistory[0].Sequence-1) {
 		return nil, nil, errors.New("设备事件存在缺口，请重新读取快照")
 	}
-	channel := make(chan DeviceEvent, 128)
-	s.mu.Lock()
+	channel := make(chan DeviceEvent, deviceReplayLimit*2)
+	for _, event := range s.deviceHistory {
+		if event.Sequence > after {
+			channel <- event
+		}
+	}
 	s.subscribers[channel] = struct{}{}
-	s.mu.Unlock()
 	return channel, func() {
-		s.mu.Lock()
+		s.deviceMu.Lock()
+		defer s.deviceMu.Unlock()
 		if _, ok := s.subscribers[channel]; ok {
 			delete(s.subscribers, channel)
 			close(channel)
 		}
-		s.mu.Unlock()
 	}, nil
 }
 
 func (s *Service) publishDevice(resourceType, resourceID, eventType string, revision int64, payload any) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	sequence := s.deviceSequence.Add(1)
-	event := DeviceEvent{ID: "device-event-" + time.Now().UTC().Format("20060102T150405.000000000") + "-" + itoa64(sequence), Sequence: sequence,
+	event := DeviceEvent{ID: "device-event-" + time.Now().UTC().Format("20060102T150405.000000000") + "-" + itoa64(sequence), Sequence: sequence, EventEpoch: s.deviceEpoch,
 		ResourceType: resourceType, ResourceID: resourceID, ResourceRevision: revision, Type: eventType, OccurredAt: s.now().UTC(), Payload: payload}
-	s.mu.RLock()
-	targets := make([]chan DeviceEvent, 0, len(s.subscribers))
-	for target := range s.subscribers {
-		targets = append(targets, target)
+	if len(s.deviceHistory) == deviceReplayLimit {
+		copy(s.deviceHistory, s.deviceHistory[1:])
+		s.deviceHistory[len(s.deviceHistory)-1] = event
+	} else {
+		s.deviceHistory = append(s.deviceHistory, event)
 	}
-	s.mu.RUnlock()
-	for _, target := range targets {
+	for target := range s.subscribers {
 		select {
 		case target <- event:
 		default:
+			// Reconnect and replay/resnapshot; never silently lose the final update.
+			delete(s.subscribers, target)
+			close(target)
 		}
 	}
 }

@@ -147,6 +147,9 @@ type Service struct {
 	sessions       map[string]*pilotSession
 	transfers      map[string]Transfer
 	commands       map[string]pendingCommand
+	deviceMu       sync.Mutex // Serializes replay, publication and unsubscribe.
+	deviceEpoch    string
+	deviceHistory  []DeviceEvent
 	subscribers    map[chan DeviceEvent]struct{}
 	deviceSequence atomic.Int64
 	admissions     sync.Map // robot ID -> *sync.Mutex; serializes command admission with stop
@@ -158,7 +161,7 @@ func NewService(st *store.Store, events EventSink) *Service {
 	}
 	return &Service{st: st, events: events, now: time.Now, twins: make(map[string]twinSample),
 		sessions: make(map[string]*pilotSession), transfers: make(map[string]Transfer),
-		commands: make(map[string]pendingCommand), subscribers: make(map[chan DeviceEvent]struct{})}
+		deviceEpoch: uuid.NewString(), commands: make(map[string]pendingCommand), subscribers: make(map[chan DeviceEvent]struct{})}
 }
 
 func (s *Service) Store() *store.Store { return s.st }
