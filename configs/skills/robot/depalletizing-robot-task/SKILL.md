@@ -11,6 +11,8 @@ tags: [robot, depalletizing, subtask, planning]
 本 Skill 只指导 Robot Agent 生成和推进 SubTask，不直接运行 Python、Ability 或
 Robot SDK。只能选择当前 Robot 已安装并启用的精确 Robot Skill 版本。
 
+此配方适用于实际安装 `semantic-navigation`、`grasp-object`、`place-object` 组合 Skill 的拆码垛机器人。其他设备的同名业务不一定具有这些组合入口：以它实际安装 Skill 的公开调用及数据依赖编排，不能把下述四步或隐含的取景、收臂、放置行为套用到仅提供原子任务的接口。
+
 ## 单箱步骤
 
 按当前 Robot Pose 和对象位置生成以下串行步骤：

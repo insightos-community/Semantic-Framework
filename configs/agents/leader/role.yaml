@@ -23,4 +23,4 @@ memory:
 
 skills:
   # Project 可继续收窄该集合，但不能额外授权 Profile 未列出的 Skill。
-  allowlist: [artifact-usage, echo-guide, data-profile, semantic-diagnostics, depalletizing-workflow-planning]
+  allowlist: [artifact-usage, echo-guide, data-profile, semantic-diagnostics, depalletizing-workflow-planning, kitchen-workflow-planning]
