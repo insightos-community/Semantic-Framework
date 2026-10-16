@@ -179,6 +179,19 @@ func (s *Service) RecoverAnsweredInteractions(ctx context.Context) error {
 	return first
 }
 
+// RecoverAnsweredTask retries only the saved answer belonging to a Task whose
+// Robot has reconnected. Routing and handled/error bookkeeping remain here.
+func (s *Service) RecoverAnsweredTask(ctx context.Context, taskID string) error {
+	value, err := s.st.GetUnhandledAnsweredInteractionForTask(taskID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return s.routeInteractionAnswer(ctx, value)
+}
+
 // AuthorizeReply 校验旧 /ws/chat 应答的连接范围。interaction_id 只负责
 // 定位记录，不能替代 Conversation 与用户归属校验；任一归属不匹配都按
 // 不存在处理，既阻止跨会话应答，也不向调用方暴露目标记录是否存在。

@@ -32,6 +32,8 @@ import (
 const (
 	pilotReadLimit    = 2 << 20
 	pilotWriteTimeout = 10 * time.Second
+	pilotPingInterval = 30 * time.Second
+	pilotPingTimeout  = 10 * time.Second
 )
 
 // PilotGateway 是 Server 与设备端 Pilot 的单一控制通道。首条消息必须完成
@@ -100,6 +102,7 @@ func (g *PilotGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer disconnect()
 	pilotID := first.Pilot.PilotInstanceID
+	go watchPilotConnection(ctx, conn, pilotPingInterval, pilotPingTimeout, cancel)
 
 	writeErr := make(chan error, 1)
 	go func() {
@@ -111,6 +114,7 @@ func (g *PilotGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeCancel()
 				if err != nil {
 					writeErr <- err
+					cancel() // unblock the concurrent reader immediately
 					return
 				}
 			case <-ctx.Done():
@@ -159,6 +163,28 @@ func (g *PilotGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.logger.Warn("Pilot 发送未知消息", "pilot_instance_id", pilotID, "message_type", message.Type)
 			_ = conn.Close(websocket.StatusUnsupportedData, "未知 Pilot 消息类型")
 			return
+		}
+	}
+}
+
+// A lost cable or powered-off host need not send TCP FIN. Probe the existing
+// WebSocket so cached readiness cannot survive until the OS TCP timeout.
+func watchPilotConnection(ctx context.Context, conn *websocket.Conn,
+	interval, timeout time.Duration, cancel context.CancelFunc) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, stop := context.WithTimeout(ctx, timeout)
+			err := conn.Ping(pingCtx)
+			stop()
+			if err != nil {
+				cancel()
+				return
+			}
 		}
 	}
 }

@@ -595,6 +595,19 @@ func TestRecoveryInteractionReturnsToFailedExecutionRecovery(t *testing.T) {
 	if err := service.RouteInteractionAnswer(context.Background(), answer); err != nil {
 		t.Fatal(err)
 	}
+	questionRun, err := st.GetRunSession(run.ID)
+	if err != nil || questionRun.Status != store.RunStatusCompleted {
+		t.Fatalf("已回答的提问 Run 不得继续占用 Task context: %+v %v", questionRun, err)
+	}
+	// A mock recovery executor does not allocate a Run; exercise the actual
+	// database constraint that previously rejected the production recovery.
+	continuation := run
+	continuation.ID = "run-recovery-answer"
+	continuation.Status = store.RunStatusRunning
+	continuation.SourceInteractionID = answer.ID
+	if err := st.CreateRunSession(continuation); err != nil {
+		t.Fatalf("回答后应可创建同一 context 的恢复 Run: %v", err)
+	}
 	select {
 	case request := <-executor.requests:
 		if request.Answer == nil || request.Answer.ID != answer.ID ||

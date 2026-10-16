@@ -182,6 +182,7 @@ func WireWithOptions(cfg *config.Config, logger *log.Logger, opts Options) (*App
 	workflowSvc, err := workflow.NewService(workflow.Deps{
 		Store: st, Bus: bus, Planner: agentRT, Executor: agentRT,
 		RobotReply: robotService, RobotStop: robotService, ConversationResumer: agentRT,
+		RobotAvailability: robotService, AnsweredTaskResumer: interactionSvc,
 	})
 	if err != nil {
 		stopSkillStore(skillStore)

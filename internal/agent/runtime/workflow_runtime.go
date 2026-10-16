@@ -54,7 +54,7 @@ func (planningToolPolicy) WrapToolCall(ctx context.Context, meta kernel.ToolCall
 	// Task Planning 不自动注入整张地图，但允许 Agent 在确有需要时查询当前
 	// 语义事实或询问用户。文件和 Artifact 探索仍然关闭，避免把历史材料误当成
 	// 当前场景；Robot 物理工具则只属于后续 Task Execution Run。
-	if meta.Name != planningSkillTool && meta.Name != "map.query" && meta.Name != "robot.list" && meta.Name != "interaction.ask" {
+	if meta.Name != planningSkillTool && meta.Name != "map.query" && meta.Name != "robot.list" && meta.Name != "robot.get" && meta.Name != "interaction.ask" {
 		return tool.ErrorResult(tool.CodeToolError,
 			fmt.Sprintf("Planning Run 不允许调用工具 %q", meta.Name), false), nil
 	}
@@ -323,6 +323,7 @@ type robotTaskSkillView struct {
 	Description     string           `json:"description"`
 	WhenToUse       string           `json:"when_to_use,omitempty"`
 	InputModel      string           `json:"input_model,omitempty"`
+	InputTasks      []string         `json:"input_tasks,omitempty"`
 	ResultModel     string           `json:"result_model,omitempty"`
 	RequiredActions []map[string]any `json:"required_actions,omitempty"`
 	StopActions     []map[string]any `json:"stop_actions,omitempty"`
@@ -427,9 +428,20 @@ func (s *Service) robotTaskPlanningCatalog(wf store.Workflow, task store.Task) (
 			inputModel, _ = runtimeSpec["input_model"].(string)
 			resultModel, _ = runtimeSpec["result_model"].(string)
 		}
+		var inputTasks []string
+		// New packages publish this discriminator from their public input model;
+		// old packages remain compatible. Ability action names are not Skill tasks.
+		if values, ok := detail.Extensions["input_tasks"].([]any); ok {
+			for _, value := range values {
+				if task, ok := value.(string); ok {
+					inputTasks = append(inputTasks, task)
+				}
+			}
+		}
 		view.Skills = append(view.Skills, robotTaskSkillView{
 			Name: detail.Name, Version: detail.Version, Description: detail.Description,
 			WhenToUse: detail.WhenToUse, InputModel: inputModel, ResultModel: resultModel,
+			InputTasks:      inputTasks,
 			RequiredActions: detail.RequiredActions, StopActions: detail.StopActions,
 		})
 	}
@@ -573,9 +585,9 @@ func decodeAndValidateTaskPlanResult(text string, task store.Task,
 		return result, nil
 	}
 
-	available := make(map[string]struct{}, len(catalog.Skills))
+	available := make(map[string]robotTaskSkillView, len(catalog.Skills))
 	for _, skill := range catalog.Skills {
-		available[skill.Name+"@"+skill.Version] = struct{}{}
+		available[skill.Name+"@"+skill.Version] = skill
 	}
 	for _, item := range result.SubTasks {
 		if item.Kind != "robot_skill" {
@@ -602,6 +614,21 @@ func decodeAndValidateTaskPlanResult(text string, task store.Task,
 		}
 		if err := rejectReservedPlanningIntent(item.ID, intent); err != nil {
 			return workflow.TaskPlanResult{}, err
+		}
+		if tasks := available[key].InputTasks; len(tasks) > 0 {
+			if requested, exists := intent["task"]; exists {
+				name, valid := requested.(string)
+				found := false
+				for _, task := range tasks {
+					if valid && name == task {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return workflow.TaskPlanResult{}, fmt.Errorf("SubTask %q 的 intent.task=%v 不属于 %s 的公开任务 %v: %w", item.ID, requested, key, tasks, store.ErrInvalidState)
+				}
+			}
 		}
 	}
 	return result, nil
@@ -716,7 +743,8 @@ func (s *Service) ExecuteTask(ctx context.Context,
 	text := ""
 	for exchange := 0; ; exchange++ {
 		var exchangeFailure *purposeToolFailure
-		text, exchangeFailure, err = s.consumePurposeRun(runCtx, rt, run, messages)
+		var evidence purposeExchangeEvidence
+		text, exchangeFailure, err = s.consumePurposeRun(runCtx, rt, run, messages, &evidence)
 		if err != nil {
 			return workflow.TaskResult{}, err
 		}
@@ -745,6 +773,7 @@ func (s *Service) ExecuteTask(ctx context.Context,
 			return workflow.TaskResult{}, correctionErr
 		}
 		correction := buildRobotExecutionFeedback(exchangeFailure)
+		messages = append(messages, evidence.messages...)
 		messages = append(messages,
 			schema.AssistantMessage(text, nil),
 			schema.UserMessage(correction))
@@ -854,6 +883,11 @@ func (s *Service) withSkillInputContract(ctx context.Context, execution workflow
 	}
 	declared, err := s.skillContracts.DescribeSkillInput(ctx, execution.Task.AssignedRobotID, spec.SkillName, spec.SkillVersion)
 	if err != nil {
+		// This is a read-only preparation call, before robot.run admission.
+		// A disconnected Pilot is a resource wait, not a failed robot action.
+		if errors.Is(err, robot.ErrPilotOffline) {
+			return "", fmt.Errorf("%w: %w", workflow.ErrTaskWaitingResource, err)
+		}
 		return "", err
 	}
 	if _, err := contract.CompileObject(declared); err != nil {
@@ -872,26 +906,47 @@ func (s *Service) withSkillInputContract(ctx context.Context, execution workflow
 // 它返回“完整的剩余步骤”而不是数据库补丁，Workflow Service 才是唯一写入者；
 // 这样模型无法修改已完成步骤，也不会借恢复之名重放 interrupted Action。
 func (s *Service) RecoverTask(ctx context.Context,
-	request workflow.TaskRecoveryRequest) (workflow.TaskRecoveryDecision, error) {
+	request workflow.TaskRecoveryRequest) (result workflow.TaskRecoveryDecision, resultErr error) {
+	defer func() {
+		if resultErr != nil && !errors.Is(resultErr, context.Canceled) &&
+			!errors.Is(resultErr, workflow.ErrTaskWaitingInput) && s.logger != nil {
+			s.logger.Warn("Task recovery decision failed", "workflow_id", request.Workflow.ID,
+				"task_id", request.Task.ID, "execution_id", request.Execution.ID,
+				"interaction_id", interactionID(request.Answer), "error", resultErr)
+		}
+	}()
 	catalog, err := s.robotTaskPlanningCatalog(request.Workflow, request.Task)
 	if err != nil {
 		return workflow.TaskRecoveryDecision{}, err
 	}
 	pending := make([]store.SubTask, 0)
-	for _, item := range mustListSubTasks(s.st, request.Task.ID) {
+	completed := make([]map[string]any, 0)
+	allSubTasks := mustListSubTasks(s.st, request.Task.ID)
+	for _, item := range allSubTasks {
 		if item.Status == store.TaskStatusPending {
 			pending = append(pending, item)
 		}
+		if item.Status == store.TaskStatusCompleted {
+			completed = append(completed, completedSubTaskContext(item))
+		}
+	}
+	executionGuidance, err := s.taskExecutionGuidance(request.Project.ID, request.Task.RequiredRole)
+	if err != nil {
+		return workflow.TaskRecoveryDecision{}, err
 	}
 	input, err := json.Marshal(map[string]any{
 		"workflow_goal":      request.Workflow.Goal,
 		"approved_scope":     request.Workflow.ApprovedScope,
 		"task_goal":          request.Task.Goal,
 		"failed_subtask":     request.SubTask,
-		"robot_execution":    request.Execution,
+		"robot_execution":    failedSubTaskContext(request.SubTask, request.Execution),
+		"action_evidence":    request.ActionEvidence,
 		"pending_subtasks":   pending,
+		"completed_subtasks": completed,
+		"failed_subtasks":    s.failedSubTaskContexts(allSubTasks, request.Task.ID),
 		"robot_catalog":      catalog,
 		"interaction_answer": request.Answer,
+		"execution_guidance": executionGuidance,
 	})
 	if err != nil {
 		return workflow.TaskRecoveryDecision{}, err
@@ -909,6 +964,9 @@ func (s *Service) RecoverTask(ctx context.Context,
 		store.RunKindTaskExecution, runtimePurposeTaskRecovery, func(text string) error {
 			value, validationErr := decodeTaskRecoveryDecision(text, request.Task, catalog)
 			if validationErr == nil {
+				validationErr = validateRetainedPending(value.RetainPendingIDs, allSubTasks, value.Replacements...)
+			}
+			if validationErr == nil {
 				decision = value
 			}
 			return validationErr
@@ -924,9 +982,10 @@ func (s *Service) RecoverTask(ctx context.Context,
 
 func decodeTaskRecoveryDecision(text string, task store.Task, catalog robotTaskPlanningView) (workflow.TaskRecoveryDecision, error) {
 	var output struct {
-		Decision     string               `json:"decision"`
-		Summary      string               `json:"summary"`
-		Replacements []store.SubTaskDraft `json:"replacements"`
+		Decision         string               `json:"decision"`
+		Summary          string               `json:"summary"`
+		Replacements     []store.SubTaskDraft `json:"replacements"`
+		RetainPendingIDs []string             `json:"retain_pending_ids,omitempty"`
 	}
 	if err := decodeStrictJSON(text, &output); err != nil {
 		return workflow.TaskRecoveryDecision{}, fmt.Errorf("Task recovery 返回非法结构: %w", err)
@@ -953,14 +1012,38 @@ func decodeTaskRecoveryDecision(text string, task store.Task, catalog robotTaskP
 			return workflow.TaskRecoveryDecision{}, fmt.Errorf("Task recovery 替代步骤违反规划契约: %w", validationErr)
 		}
 	case "fail_task":
-		if len(output.Replacements) != 0 {
+		if len(output.Replacements) != 0 || len(output.RetainPendingIDs) != 0 {
 			return workflow.TaskRecoveryDecision{}, fmt.Errorf("fail_task 不得携带替代步骤: %w", store.ErrInvalidState)
 		}
 	default:
 		return workflow.TaskRecoveryDecision{}, fmt.Errorf("Task recovery decision 非法: %w", store.ErrInvalidState)
 	}
 	return workflow.TaskRecoveryDecision{Decision: output.Decision,
-		Replacements: output.Replacements, Summary: output.Summary}, nil
+		Replacements: output.Replacements, RetainPendingIDs: output.RetainPendingIDs, Summary: output.Summary}, nil
+}
+
+// IDs refer to existing unstarted steps. The store checks them again in the
+// recovery transaction; this early check lets the agent correct stale IDs.
+func validateRetainedPending(ids []string, pending []store.SubTask, prefix ...store.SubTaskDraft) error {
+	available := make(map[string]bool, len(pending))
+	for _, item := range pending {
+		available[item.ID] = item.Status == store.TaskStatusPending && item.ExecutionRef == ""
+	}
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if !available[id] || seen[id] {
+			return fmt.Errorf("retain_pending_ids %q 必须是本轮尚未执行且不重复的 SubTask ID: %w", id, store.ErrInvalidState)
+		}
+		seen[id] = true
+	}
+	if len(ids) > 0 {
+		for _, item := range prefix {
+			if _, exists := available[item.ID]; exists {
+				return fmt.Errorf("修复前缀 ID %q 已存在，请使用新 ID 并保留原记录: %w", item.ID, store.ErrInvalidState)
+			}
+		}
+	}
+	return nil
 }
 
 func mustListSubTasks(st *store.Store, taskID string) []store.SubTask {
@@ -1015,6 +1098,12 @@ func (s *Service) runTaskAgent(ctx context.Context, userID string, project store
 		return "", err
 	}
 	defer release()
+	if runtimePurpose == runtimePurposeTaskRecovery {
+		if scope, ok := tool.ExecutionScopeFromContext(runCtx); ok {
+			scope.PlanningContract = true
+			runCtx = tool.WithExecutionScope(runCtx, scope)
+		}
+	}
 	var taskExecution workflow.TaskExecution
 	var taskMessageID string
 	if taskValue != nil {
@@ -1038,7 +1127,12 @@ func (s *Service) runTaskAgent(ctx context.Context, userID string, project store
 		// checkpoint决策与失败恢复只消费调用方构造的当前Execution视图。它们
 		// 仍写入同一个Task Context，但不重新加载历史robot.run参数和旧错误，
 		// 避免一次局部判断误匹配成早先的SubTask执行请求。
-		messages = []*schema.Message{schema.UserMessage(prompt)}
+		// Project Memory 是用户维护的任务知识，不是旧动作历史。恢复Run仍需
+		// 读取它，否则正常执行能命中的经验恰好会在失败后丢失。
+		if runtimePurpose == runtimePurposeTaskRecovery {
+			messages, err = s.loadProjectMemoryMessages(project.ID)
+		}
+		messages = append(messages, schema.UserMessage(prompt))
 	} else {
 		var history loadedContext
 		history, err = s.loadContextHistory(conversation.ID, rt.supportsVision)
@@ -1051,7 +1145,8 @@ func (s *Service) runTaskAgent(ctx context.Context, userID string, project store
 	// Final-output validation and tool feedback share a bounded correction
 	// budget. Identical error descriptions do not prove identical outputs.
 	for exchange := 0; ; exchange++ {
-		text, _, runErr = s.consumePurposeRun(runCtx, rt, run, messages)
+		var evidence purposeExchangeEvidence
+		text, _, runErr = s.consumePurposeRun(runCtx, rt, run, messages, &evidence)
 		if taskValue != nil {
 			if _, pendingErr := s.st.GetPendingInteractionByRunID(run.ID); pendingErr == nil {
 				waiting, transitionErr := s.st.TransitionRunStatus(run.ID,
@@ -1091,6 +1186,7 @@ func (s *Service) runTaskAgent(ctx context.Context, userID string, project store
 		} else if runtimePurpose == runtimePurposeTaskRecovery {
 			correction = buildTaskRecoveryCorrectionPrompt(problem)
 		}
+		messages = append(messages, evidence.messages...)
 		messages = append(messages,
 			schema.AssistantMessage(text, nil),
 			schema.UserMessage(correction))
@@ -1163,6 +1259,9 @@ func (s *Service) buildPurposeRuntimeWithSkills(ctx context.Context, sessionID, 
 				"plan.suggest", "interaction.ask"}
 		} else if planning {
 			derived.Tools.Namespaces = []string{"map.query", "robot.list", "interaction.ask"}
+			if strings.HasPrefix(agentID, "robot:") {
+				derived.Tools.Namespaces = append(derived.Tools.Namespaces, "robot.get")
+			}
 		} else if robotDecision {
 			// 抓取、放置等物理checkpoint必须只消费Skill已经给出的当前事实，
 			// 不能因为通用Prompt误导而重新查询整张Map。仅导航目标替换需要
@@ -1186,7 +1285,10 @@ func (s *Service) buildPurposeRuntimeWithSkills(ctx context.Context, sessionID, 
 		derived.Tools.ToolSearch = false
 		derived.Interrupt.ApprovalRequired = nil
 		if planning {
-			derived.Instruction += "\n\n当前是 Task Planning Run：依据 Task input、实际 Robot/Skill 目录进行拆解；可以按需加载 Project Agent Skill或当前 Robot Skill正文，也可在确实需要环境事实时调用 map.query。不得读取文件或Artifact，不得执行命令、运行Robot Skill、委派Agent、部署或操作Robot。仅当缺少会改变业务结果、授权或安全选择且无法从当前上下文或只读工具获得的用户决定时调用 interaction.ask，并说明具体缺失项；已批准的步骤无需再次询问是否开始，设备忙碌或离线只属于资源等待。最终回复必须是调用方指定的单个JSON对象。"
+			// The per-run user message can be summarized during a long plan.
+			// Keep the machine response contract in the persistent instruction.
+			derived.Instruction += "\n\n" + taskPlanningInstruction + taskDependencyInstruction
+			derived.Instruction += "\n\n当前是 Task Planning Run：依据 Task input、实际 Robot/Skill 目录进行拆解；可以按需加载 Project Agent Skill或当前 Robot Skill正文；正文引用的必要流程说明通过 robot.get(skill_name, resource_path) 读取确切已安装包内文档，也可在确实需要环境事实时调用 map.query。不得读取任意主机文件或Artifact，不得执行命令、运行Robot Skill、委派Agent、部署或操作Robot。仅当缺少会改变业务结果、授权或安全选择且无法从当前上下文或只读工具获得的用户决定时调用 interaction.ask，并说明具体缺失项；已批准的步骤无需再次询问是否开始，设备忙碌或离线只属于资源等待。最终回复必须是调用方指定的单个JSON对象。"
 		} else if planConversation {
 			derived.Instruction += `
 当前对话由用户显式选择了 Plan Mode。你仍在原 Conversation 中与用户交流：先读取必要上下文、说明理解，只提出真正影响方案的澄清问题；需要结构化回答时调用 interaction.ask，回答会在新的 Leader Run 中自动带回，然后继续收敛。不得修改文件、执行命令、调用 Skill、委派 Agent、部署或操作 Robot。不要在需求仍不明确时调用 plan.suggest；当目标、约束和完成条件已经足够时，调用 plan.suggest，并在 tasks 中提交完整的 Leader Task TODO 与依赖。Task 只描述业务目标、角色、能力、资源范围和完成标准，不要生成 SubTask、Stage、Action 或 Ability。plan.suggest 成功即表示当前 revision 已 ready，可由计划卡完整展示；只需简短请用户在计划卡审阅、批准或继续对话修改，不要在回复中重复整份计划。批准由用户界面携带精确 revision 直接提交给 Workflow Service，Leader 不执行批准状态迁移，也不能声称仅凭一条自然语言消息已经开始 Workflow。用户要求调整时，应重新调用 plan.suggest 生成新 revision。constraints 与 completion_criteria 必须传数组或对象；map_binding 只有在用户要求核对地图且已有精确 map_id、generation 与 selections 时才传，没有有效选择时省略。绝不能用 true/false 充当结构化字段。若工具返回 BAD_ARGUMENTS，应按错误纠正参数，最多再调用一次。不要使用 artifact.list 推断 Workflow 或 Robot Execution 状态，领域进度由 Workflow/Robot 事件和运行视图展示。不要把 Markdown 文本冒充可执行 Workflow。`
@@ -1196,8 +1298,11 @@ func (s *Service) buildPurposeRuntimeWithSkills(ctx context.Context, sessionID, 
 		} else if robotDecision {
 			derived.Instruction += "\n\n当前是Robot Skill安全checkpoint的局部决策Run。只根据当前请求中的reason、context、allowed_decisions和response_schema返回类型化JSON；不得调用robot.run/stop、修改Workflow或重新规划整个Task。抓取或放置checkpoint不是导航规划，不得自行改写底盘目标。确需业务或安全选择时可以询问用户。"
 		} else if taskRecovery {
+			derived.Instruction += "\n\n" + taskRecoveryInstruction + taskDependencyInstruction + robotResultLookupInstruction
+			derived.Instruction += "\n恢复所需前序结果优先按 completed_subtasks.result_lookup 读取；不要用 artifact.list 搜索任务状态。已有错误说明输入缺失且已有对应前置结果时，直接提出必要补齐步骤和剩余步骤，不必再次复制全部轨迹或规划包。相关 Artifact 仅在已有明确引用且缺少该证据时读取。"
 			derived.Instruction += "\n\n当前是已明确failed的Robot Execution恢复Run。可以读取当前Robot、地图和相关证据，确需业务或安全选择时可以询问用户；不得直接运行或停止Robot，不得修改已完成步骤或重放原Execution。最终只返回调用方要求的恢复JSON。"
 		} else if robotExecution {
+			derived.Instruction += "\n\n" + taskRoleInstructions["robot"] + robotResultLookupInstruction + robotToolTransportInstruction
 			derived.Instruction += "\n\n当前是Robot Task中一个SubTask的执行Run。只能读取当前Robot或必要地图参考、询问用户、运行或安全停止当前Robot Skill；不得读写工作区、委派SubAgent或操作其他Task。已获批准的步骤无需再次询问是否开始；仅当缺少会改变结果、授权或安全选择的用户决定时调用 interaction.ask，并说明具体缺失项。"
 		} else {
 			derived.Instruction += "\n\n当前 Run 只负责总结一个已经进入终态的 Workflow。必须以注入的结构化 Task/SubTask 结果和证据为准；不得调用工具、重新规划、声称未出现的结果，或启动任何新的执行。"
@@ -1411,7 +1516,7 @@ func (s *Service) registerPurposeRun(parent context.Context, run store.RunSessio
 }
 
 func (s *Service) consumePurposeRun(ctx context.Context, rt *sessionRuntime, run store.RunSession,
-	messages []*schema.Message) (string, *purposeToolFailure, error) {
+	messages []*schema.Message, evidence ...*purposeExchangeEvidence) (string, *purposeToolFailure, error) {
 	start := time.Now()
 	defer func() {
 		if s.logger != nil {
@@ -1433,9 +1538,16 @@ func (s *Service) consumePurposeRun(ctx context.Context, rt *sessionRuntime, run
 			return "", lastToolFailure, errors.New("Agent 事件流在终态前关闭")
 		}
 		s.publishPurposeProgress(ctx, rt, run, event)
+		if len(evidence) > 0 && evidence[0] != nil {
+			evidence[0].observe(event)
+		}
 		switch event.Kind {
 		case kernel.EventTextDelta:
 			text.WriteString(event.Text)
+		case kernel.EventToolCall:
+			// Commentary emitted before a tool is progress, not part of the
+			// final typed result. It has already been published above.
+			text.Reset()
 		case kernel.EventToolResult:
 			if failure := parsePurposeToolFailure(event.ToolName, event.Text); failure != nil {
 				lastToolFailure = failure
@@ -1474,27 +1586,21 @@ func (s *Service) loadTaskContext(execution workflow.TaskExecution) ([]*schema.M
 func (s *Service) loadRobotTaskExecutionContext(
 	execution workflow.TaskExecution,
 ) ([]*schema.Message, error) {
-	messages, _, err := s.loadTaskContextPrelude(execution)
-	if err != nil {
-		return nil, err
-	}
 	// Robot Task的每个SubTask都会临时注入当前一份完整Skill契约。历史Run仍
 	// 保存在同一个Task Context供Trace/Inspector查看，但不能再次装入模型；
 	// completed_subtasks、实时Robot状态和Interaction回答已由本轮结构化Prompt
 	// 提供，重复加载旧robot.run参数只会制造过期事实并按步骤累积Token。
-	return messages, nil
+	// 同样不能把这些旧调用通过历史摘要重新装回来。摘要在长任务里会保留
+	// 已替换步骤、旧坐标和失败恢复草稿；原始记录仍可按 execution_id 查询。
+	return s.loadProjectMemoryMessages(execution.Project.ID)
 }
 
 func (s *Service) loadTaskContextPrelude(
 	execution workflow.TaskExecution,
 ) ([]*schema.Message, string, error) {
-	messages := make([]*schema.Message, 0)
-	memory, err := s.st.GetProjectMemory(execution.Project.ID)
+	messages, err := s.loadProjectMemoryMessages(execution.Project.ID)
 	if err != nil {
 		return nil, "", err
-	}
-	if content := strings.TrimSpace(memory.Content); content != "" {
-		messages = append(messages, schema.SystemMessage("Project Memory（用户维护）：\n\n"+content))
 	}
 	summary, err := s.st.GetContextSummary(execution.Task.ContextID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -1508,6 +1614,17 @@ func (s *Service) loadTaskContextPrelude(
 		}
 	}
 	return messages, after, nil
+}
+
+func (s *Service) loadProjectMemoryMessages(projectID string) ([]*schema.Message, error) {
+	memory, err := s.st.GetProjectMemory(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if content := strings.TrimSpace(memory.Content); content != "" {
+		return []*schema.Message{schema.SystemMessage("Project Memory（用户维护）：\n\n" + content)}, nil
+	}
+	return nil, nil
 }
 
 func (s *Service) appendTaskMessage(execution workflow.TaskExecution, run store.RunSession,
@@ -1565,20 +1682,7 @@ func (s *Service) taskExecutionPrompt(execution workflow.TaskExecution) (string,
 			subTask.Status != store.TaskStatusCompleted {
 			continue
 		}
-		var spec struct {
-			SkillName    string `json:"skill_name"`
-			SkillVersion string `json:"skill_version"`
-		}
-		_ = json.Unmarshal(subTask.Spec, &spec)
-		// 完整 Robot Skill 结果仍保存在 Store，供 Inspector、Leader 总结和审计读取；
-		// 下一项 Skill 会重新读取当前物理状态，因此 Task Agent 只需要知道前序步骤
-		// 已完成及其证据，不能继续承担 HeldObjectState 等大对象的字段搬运。
-		completedSubTasks = append(completedSubTasks, map[string]any{
-			"subtask_id": subTask.ID, "skill_name": spec.SkillName,
-			"skill_version": spec.SkillVersion, "status": subTask.Status,
-			"execution_id":   subTask.ExecutionRef,
-			"result_summary": subTask.Goal + "已完成", "evidence_refs": subTask.Evidence,
-		})
+		completedSubTasks = append(completedSubTasks, completedSubTaskContext(subTask))
 	}
 	var currentSkillContract *robotTaskSkillView
 	if execution.Task.RequiredRole == "robot" {
@@ -1650,6 +1754,7 @@ func (s *Service) taskExecutionPrompt(execution workflow.TaskExecution) (string,
 		},
 		"dependency_results":     dependencyResults,
 		"completed_subtasks":     completedSubTasks,
+		"failed_subtasks":        s.failedSubTaskContexts(view.SubTasks, execution.Task.ID),
 		"current_subtask":        execution.SubTasks[0],
 		"execution_guidance":     executionGuidance,
 		"current_skill_contract": currentSkillContract,
@@ -1660,6 +1765,50 @@ func (s *Service) taskExecutionPrompt(execution workflow.TaskExecution) (string,
 		return "", err
 	}
 	return buildTaskExecutionPrompt(execution.Task.RequiredRole, data), nil
+}
+
+// Keep the goal separate from observed completion. A successful planning call
+// must never be summarized as having executed the motion written in the goal.
+func completedSubTaskContext(subTask store.SubTask) map[string]any {
+	var spec struct {
+		SkillName    string `json:"skill_name"`
+		SkillVersion string `json:"skill_version"`
+	}
+	_ = json.Unmarshal(subTask.Spec, &spec)
+	completed := map[string]any{
+		"subtask_id": subTask.ID, "goal": subTask.Goal, "skill_name": spec.SkillName,
+		"skill_version": spec.SkillVersion, "status": subTask.Status,
+		"execution_id": subTask.ExecutionRef, "evidence_refs": subTask.Evidence,
+		"result_summary": "该步骤调用已结束；业务效果以原执行结果为准。",
+	}
+	var envelope struct {
+		Result struct {
+			Task       string `json:"task"`
+			Completion string `json:"completion"`
+			Summary    string `json:"summary"`
+			NextStep   string `json:"next_step"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(subTask.Result, &envelope) == nil {
+		if envelope.Result.Summary != "" {
+			completed["result_summary"] = envelope.Result.Summary
+		}
+		if envelope.Result.Completion != "" {
+			completed["completion"] = envelope.Result.Completion
+		}
+		if envelope.Result.Task != "" {
+			completed["skill_task"] = envelope.Result.Task
+		}
+		if envelope.Result.NextStep != "" {
+			completed["next_step"] = envelope.Result.NextStep
+		}
+	}
+	if subTask.Kind == "robot_skill" && subTask.ExecutionRef != "" {
+		completed["result_lookup"] = map[string]any{
+			"tool": "robot.get", "arguments": map[string]any{"execution_id": subTask.ExecutionRef},
+		}
+	}
+	return completed
 }
 
 func decodeStrictJSON(text string, target any) error {
