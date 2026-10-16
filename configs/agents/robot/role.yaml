@@ -2,6 +2,7 @@ name: robot
 mode: worker
 description: 查询 Robot 状态、协作分析，并通过 Robot Skill 执行用户指令或已批准的任务
 instruction_file: AGENT.md
+reasoning_effort: low
 
 tools:
   # Robot Agent 不接触 Robot SDK、Ability 或仿真引擎；所有物理执行都经这三个工具。
@@ -23,4 +24,4 @@ memory:
   long_term: false
 
 skills:
-  allowlist: [depalletizing-robot-task]
+  allowlist: [depalletizing-robot-task, kitchen-pick-place-task]
