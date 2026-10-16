@@ -105,18 +105,26 @@ func (s *Service) runWorkflowTerminalSummary(ctx context.Context, project store.
 	}
 	defer release()
 
-	encoded, err := json.Marshal(view)
+	facts := workflowTerminalContext(view)
+	answers, _, answerErr := s.st.ListInteractions(store.InteractionFilter{
+		ProjectID: project.ID, SessionID: conversation.ID, Status: store.InteractionStatusAnswered}, 100, 0)
+	if answerErr != nil {
+		facts["interaction_evidence_error"] = answerErr.Error()
+	} else {
+		facts["answered_interactions"] = terminalInteractionContext(view.Workflow.ID, answers)
+	}
+	encoded, err := json.Marshal(facts)
 	if err != nil {
 		return err
 	}
 	prompt := "下面是已经进入终态的 Workflow 结构化事实：\n" + string(encoded) +
 		"\n请在原对话中向用户简洁汇总：目标是否完成、各 Task 的真实结果、失败或停止原因，以及已有证据引用。不要推测缺失信息。"
-	history, err := s.loadContextHistory(conversation.ID, rt.supportsVision)
-	if err != nil {
-		return err
-	}
+	// Terminal facts already include the approved goal, actual task outcomes and
+	// receipt references. Replaying the conversation here also replays tool
+	// responses containing entire trajectory packets (Oct 15: 1.96M tokens).
+	// The original conversation remains stored; it is not execution evidence.
 	text, _, runErr := s.consumePurposeRun(runCtx, rt, run,
-		append(history.Messages, schema.UserMessage(prompt)))
+		[]*schema.Message{schema.UserMessage(prompt)})
 	checkStart := time.Now()
 	if runErr == nil && strings.TrimSpace(text) == "" {
 		runErr = fmt.Errorf("Workflow summary is empty; no factual summary was produced")
